@@ -1,0 +1,14 @@
+# Secrets
+firebase-service-account.json
+.env
+.env.*
+!.env.example
+
+# SQLite local runtime files
+smartlocker.db
+smartlocker.db-shm
+smartlocker.db-wal
+
+# Node
+node_modules/
+npm-debug.log*
