@@ -19,11 +19,17 @@ import { UserRole } from '../services/authApi';
 
 type ActionMode = 'LOGIN' | 'REGISTER' | null;
 
-const roleLabel = (role: UserRole) =>
-  role === 'ADMIN' ? 'Admin' : 'Cư dân';
+const roleLabel = (role: UserRole) => {
+  if (role === 'ADMIN') return 'Admin';
+  if (role === 'SHIPPER') return 'Shipper';
+  return 'Cư dân';
+};
 
-const roleIcon = (role: UserRole) =>
-  role === 'ADMIN' ? '👨‍💼' : '🏠';
+const roleIcon = (role: UserRole) => {
+  if (role === 'ADMIN') return '👨‍💼';
+  if (role === 'SHIPPER') return '🚚';
+  return '🏠';
+};
 
 const maskPhone = (phone: string) => {
   if (phone.length < 7) {
@@ -51,7 +57,12 @@ export default function HomeScreen({ navigation }: any) {
       index: 0,
       routes: [
         {
-          name: role === 'ADMIN' ? 'Admin' : 'Resident',
+          name:
+            role === 'ADMIN'
+              ? 'Admin'
+              : role === 'SHIPPER'
+                ? 'Shipper'
+                : 'Resident',
         },
       ],
     });
@@ -158,7 +169,7 @@ export default function HomeScreen({ navigation }: any) {
           </Text>
 
           <Text style={styles.authDescription}>
-            Admin và Cư dân sử dụng tài khoản. Shipper có thể giao hàng nhanh mà không cần đăng nhập.
+            Admin, Cư dân và Shipper đều sử dụng tài khoản để bảo vệ hệ thống SmartLocker.
           </Text>
 
           <TouchableOpacity
@@ -180,32 +191,6 @@ export default function HomeScreen({ navigation }: any) {
           </TouchableOpacity>
         </View>
 
-        <View style={styles.dividerRow}>
-          <View style={styles.divider} />
-          <Text style={styles.dividerText}>SHIPPER</Text>
-          <View style={styles.divider} />
-        </View>
-
-        <TouchableOpacity
-          activeOpacity={0.85}
-          style={styles.shipperCard}
-          onPress={() => navigation.navigate('Shipper')}
-        >
-          <View style={styles.shipperIconBox}>
-            <Text style={styles.shipperIcon}>🚚</Text>
-          </View>
-
-          <View style={styles.shipperInfo}>
-            <Text style={styles.shipperTitle}>
-              Giao hàng nhanh
-            </Text>
-            <Text style={styles.shipperDescription}>
-              Vào thẳng màn hình Shipper • Không cần tài khoản
-            </Text>
-          </View>
-
-          <Text style={styles.shipperArrow}>›</Text>
-        </TouchableOpacity>
       </ScrollView>
 
       <Modal
@@ -257,7 +242,9 @@ export default function HomeScreen({ navigation }: any) {
                               styles.accountAvatar,
                               account.role === 'ADMIN'
                                 ? styles.adminAvatar
-                                : styles.residentAvatar,
+                                : account.role === 'SHIPPER'
+                                  ? styles.shipperAvatar
+                                  : styles.residentAvatar,
                             ]}
                           >
                             <Text style={styles.accountAvatarText}>
@@ -347,6 +334,31 @@ export default function HomeScreen({ navigation }: any) {
                   {actionMode === 'REGISTER'
                     ? 'Tạo tài khoản quản trị bằng mã Admin'
                     : 'Đăng nhập để quản lý tủ và lịch sử'}
+                </Text>
+              </View>
+
+              <Text style={styles.roleArrow}>›</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={styles.roleCard}
+              onPress={() => chooseRole('SHIPPER')}
+            >
+              <View
+                style={[
+                  styles.roleIconBox,
+                  styles.shipperAvatar,
+                ]}
+              >
+                <Text style={styles.roleIcon}>🚚</Text>
+              </View>
+
+              <View style={styles.roleInfo}>
+                <Text style={styles.roleTitle}>Shipper</Text>
+                <Text style={styles.roleDescription}>
+                  {actionMode === 'REGISTER'
+                    ? 'Tạo tài khoản bằng mã giới thiệu Shipper'
+                    : 'Đăng nhập để dùng camera AI và tạo đơn giao hàng'}
                 </Text>
               </View>
 
@@ -461,6 +473,9 @@ const styles = StyleSheet.create({
   },
   adminAvatar: {
     backgroundColor: '#E5F1FF',
+  },
+  shipperAvatar: {
+    backgroundColor: '#FFF0D1',
   },
   accountAvatarText: {
     fontSize: 22,

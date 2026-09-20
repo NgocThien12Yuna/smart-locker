@@ -32,7 +32,6 @@
     "react-native-svg": "^15.15.5",
     "react-native-vector-icons": "^10.3.0",
     "react-native-vision-camera": "^5.2.3",
-    "react-native-vision-camera-barcode-scanner": "^5.2.3",
     "react-native-worklets-core": "^1.6.3"
   },
   "devDependencies": {

@@ -1,6 +1,6 @@
 import { API_BASE_URL } from '../config/api';
 
-export type UserRole = 'ADMIN' | 'RESIDENT';
+export type UserRole = 'ADMIN' | 'RESIDENT' | 'SHIPPER';
 
 export type AuthUser = {
   id: number;
@@ -61,7 +61,7 @@ const request = async (
     console.error('AUTH NETWORK ERROR:', error);
 
     throw new ApiError(
-      'Không kết nối được SmartLocker Backend. Kiểm tra backend đang chạy, IP laptop và Wi-Fi.',
+      'Không kết nối được SmartLocker Backend. Kiểm tra Internet và backend Railway.',
       0,
     );
   }
@@ -86,6 +86,7 @@ export const registerAccount = async (payload: {
   password: string;
   role: UserRole;
   adminCode?: string;
+  shipperCode?: string;
 }): Promise<AuthResponse> => {
   return request('/auth/register', {
     method: 'POST',
@@ -96,6 +97,9 @@ export const registerAccount = async (payload: {
       ...(payload.role === 'ADMIN'
         ? { adminCode: payload.adminCode || '' }
         : {}),
+      ...(payload.role === 'SHIPPER'
+        ? { shipperCode: payload.shipperCode || '' }
+        : {}),
     }),
   });
 };
@@ -103,7 +107,7 @@ export const registerAccount = async (payload: {
 export const loginAccount = async (input: {
   phone: string;
   password: string;
-  role: 'ADMIN' | 'RESIDENT';
+  role: UserRole;
 }) => {
   const url = `${API_BASE_URL}/auth/login`;
 

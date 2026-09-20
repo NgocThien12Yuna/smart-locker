@@ -29,6 +29,7 @@ import * as jpeg from 'jpeg-js';
 import { Buffer } from 'buffer';
 
 import { API_BASE_URL } from '../config/api';
+import { useAuth } from '../context/AuthContext';
 
 // jpeg-js trên Hermes có thể cần Buffer ở global.
 if (!(globalThis as any).Buffer) {
@@ -1097,7 +1098,14 @@ const isVietnamMobile = (
 // SCREEN
 // ============================================================
 
-export const ShipperScreen = () => {
+export const ShipperScreen = ({
+  navigation,
+}: any) => {
+  const {
+    currentUser,
+    currentToken,
+    logoutToHome,
+  } = useAuth();
 
   // ==========================================================
   // CAMERA
@@ -1184,7 +1192,38 @@ export const ShipperScreen = () => {
   // ==========================================================
 
   useEffect(() => {
-    if (!hasPermission) {
+    if (
+    !currentUser ||
+    currentUser.role !== 'SHIPPER'
+  ) {
+    return (
+      <View style={styles.authRequired}>
+        <Text style={styles.authRequiredIcon}>🔒</Text>
+        <Text style={styles.authRequiredTitle}>
+          Chưa đăng nhập Shipper
+        </Text>
+        <Text style={styles.authRequiredText}>
+          Vui lòng đăng nhập bằng tài khoản Shipper để sử dụng camera AI và tạo đơn giao hàng.
+        </Text>
+
+        <TouchableOpacity
+          style={styles.backHomeButton}
+          onPress={() =>
+            navigation.reset({
+              index: 0,
+              routes: [{ name: 'Home' }],
+            })
+          }
+        >
+          <Text style={styles.backHomeButtonText}>
+            VỀ TRANG CHỦ
+          </Text>
+        </TouchableOpacity>
+      </View>
+    );
+  }
+
+  if (!hasPermission) {
       requestPermission();
     }
   }, [
@@ -1946,8 +1985,8 @@ export const ShipperScreen = () => {
   // ==========================================================
   // 4. BACKEND: TẠO ĐƠN + FIREBASE PUSH
   //
-  // Shipper KHÔNG cần đăng nhập.
-  // App gửi SĐT người nhận lên backend.
+  // Shipper BẮT BUỘC đăng nhập.
+  // App gửi JWT + SĐT người nhận lên backend.
   // Backend sẽ:
   //   1) tìm tài khoản RESIDENT theo SĐT,
   //   2) tự tìm tủ trống phù hợp size,
@@ -1957,6 +1996,18 @@ export const ShipperScreen = () => {
   // ==========================================================
 
   const handleDeposit = async () => {
+    if (
+      !currentUser ||
+      currentUser.role !== 'SHIPPER' ||
+      !currentToken
+    ) {
+      Alert.alert(
+        'Chưa đăng nhập Shipper',
+        'Vui lòng đăng nhập bằng tài khoản Shipper để tạo đơn.',
+      );
+      return;
+    }
+
     if (!phoneNumber) {
       Alert.alert(
         'Lỗi',
@@ -1988,12 +2039,15 @@ export const ShipperScreen = () => {
           headers: {
             'Content-Type':
               'application/json',
+            Authorization:
+              `Bearer ${currentToken}`,
           },
           body: JSON.stringify({
             receiverPhone:
               phoneNumber,
             size: 'M',
-            sender: 'Shipper',
+            sender:
+              `Shipper ${currentUser.phone}`,
           }),
         }
       );
@@ -2077,6 +2131,15 @@ export const ShipperScreen = () => {
     }
   };
 
+  const handleLogout = () => {
+    logoutToHome();
+
+    navigation.reset({
+      index: 0,
+      routes: [{ name: 'Home' }],
+    });
+  };
+
   // ==========================================================
   // CAMERA PERMISSION / DEVICE
   // ==========================================================
@@ -2129,6 +2192,26 @@ export const ShipperScreen = () => {
         📦 Giao Hàng Shipper
       </Text>
 
+      <View style={styles.shipperAccountCard}>
+        <View style={{ flex: 1 }}>
+          <Text style={styles.shipperAccountLabel}>
+            🚚 SHIPPER ĐÃ XÁC THỰC
+          </Text>
+          <Text style={styles.shipperAccountPhone}>
+            {currentUser.phone}
+          </Text>
+        </View>
+
+        <TouchableOpacity
+          style={styles.shipperLogoutButton}
+          onPress={handleLogout}
+        >
+          <Text style={styles.shipperLogoutText}>
+            Đăng xuất
+          </Text>
+        </TouchableOpacity>
+      </View>
+
       <View
         style={
           styles.softwareModeCard
@@ -2147,7 +2230,7 @@ export const ShipperScreen = () => {
             styles.softwareModeText
           }
         >
-          V7 tự tìm SĐT người nhận. Khi xác nhận, backend tự chọn tủ trống phù hợp rồi gửi Firebase cho cư dân.
+          Chỉ Shipper đã đăng nhập mới được tạo đơn. Backend xác thực tài khoản, tự chọn tủ rồi gửi Firebase cho cư dân.
         </Text>
       </View>
 
@@ -2429,6 +2512,82 @@ export const ShipperScreen = () => {
 
 const styles =
   StyleSheet.create({
+    authRequired: {
+      flex: 1,
+      justifyContent: 'center',
+      alignItems: 'center',
+      padding: 28,
+      backgroundColor: '#F8F9FA',
+    },
+
+    authRequiredIcon: {
+      fontSize: 48,
+      marginBottom: 12,
+    },
+
+    authRequiredTitle: {
+      fontSize: 21,
+      fontWeight: '900',
+      color: '#212529',
+      marginBottom: 8,
+    },
+
+    authRequiredText: {
+      textAlign: 'center',
+      color: '#6C757D',
+      lineHeight: 20,
+      marginBottom: 20,
+    },
+
+    backHomeButton: {
+      backgroundColor: '#FF6B00',
+      paddingHorizontal: 24,
+      paddingVertical: 13,
+      borderRadius: 10,
+    },
+
+    backHomeButtonText: {
+      color: '#FFFFFF',
+      fontWeight: '900',
+    },
+
+    shipperAccountCard: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      backgroundColor: '#FFF8EC',
+      borderWidth: 1,
+      borderColor: '#FFD79A',
+      borderRadius: 12,
+      padding: 12,
+      marginBottom: 12,
+    },
+
+    shipperAccountLabel: {
+      color: '#9A5B13',
+      fontSize: 11,
+      fontWeight: '900',
+    },
+
+    shipperAccountPhone: {
+      marginTop: 3,
+      color: '#212529',
+      fontSize: 16,
+      fontWeight: '900',
+    },
+
+    shipperLogoutButton: {
+      backgroundColor: '#DC3545',
+      paddingHorizontal: 12,
+      paddingVertical: 9,
+      borderRadius: 8,
+    },
+
+    shipperLogoutText: {
+      color: '#FFFFFF',
+      fontSize: 12,
+      fontWeight: '900',
+    },
+
     container: {
       padding: 20,
       backgroundColor: '#F8F9FA',

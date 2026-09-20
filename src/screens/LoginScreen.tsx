@@ -28,7 +28,9 @@ export default function LoginScreen({
   const role: UserRole =
     route?.params?.role === 'ADMIN'
       ? 'ADMIN'
-      : 'RESIDENT';
+      : route?.params?.role === 'SHIPPER'
+        ? 'SHIPPER'
+        : 'RESIDENT';
 
   const [phone, setPhone] = useState(
     normalizePhone(route?.params?.prefillPhone || ''),
@@ -37,25 +39,35 @@ export default function LoginScreen({
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
 
-  const roleMeta = useMemo(
-    () =>
-      role === 'ADMIN'
-        ? {
-            icon: '👨‍💼',
-            title: 'Đăng nhập Admin',
-            description:
-              'Truy cập quản trị và giám sát hệ thống tủ.',
-            target: 'Admin',
-          }
-        : {
-            icon: '🏠',
-            title: 'Đăng nhập Cư dân',
-            description:
-              'Xem kiện hàng và nhận thông báo SmartLocker.',
-            target: 'Resident',
-          },
-    [role],
-  );
+  const roleMeta = useMemo(() => {
+    if (role === 'ADMIN') {
+      return {
+        icon: '👨‍💼',
+        title: 'Đăng nhập Admin',
+        description:
+          'Truy cập quản trị và giám sát hệ thống tủ.',
+        target: 'Admin',
+      };
+    }
+
+    if (role === 'SHIPPER') {
+      return {
+        icon: '🚚',
+        title: 'Đăng nhập Shipper',
+        description:
+          'Đăng nhập để sử dụng camera AI và tạo đơn giao hàng.',
+        target: 'Shipper',
+      };
+    }
+
+    return {
+      icon: '🏠',
+      title: 'Đăng nhập Cư dân',
+      description:
+        'Xem kiện hàng và nhận thông báo SmartLocker.',
+      target: 'Resident',
+    };
+  }, [role]);
 
   const handleLogin = async () => {
     if (!/^0\d{9}$/.test(phone)) {

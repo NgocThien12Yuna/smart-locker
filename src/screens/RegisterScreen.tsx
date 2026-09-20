@@ -28,34 +28,47 @@ export default function RegisterScreen({
   const role: UserRole =
     route?.params?.role === 'ADMIN'
       ? 'ADMIN'
-      : 'RESIDENT';
+      : route?.params?.role === 'SHIPPER'
+        ? 'SHIPPER'
+        : 'RESIDENT';
 
   const [phone, setPhone] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [adminCode, setAdminCode] = useState('');
+  const [shipperCode, setShipperCode] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
 
-  const roleMeta = useMemo(
-    () =>
-      role === 'ADMIN'
-        ? {
-            icon: '👨‍💼',
-            title: 'Đăng ký Admin',
-            description:
-              'Admin cần mã đăng ký do hệ thống SmartLocker cấp.',
-            target: 'Admin',
-          }
-        : {
-            icon: '🏠',
-            title: 'Đăng ký Cư dân',
-            description:
-              'Tạo tài khoản bằng số điện thoại để nhận kiện hàng và thông báo.',
-            target: 'Resident',
-          },
-    [role],
-  );
+  const roleMeta = useMemo(() => {
+    if (role === 'ADMIN') {
+      return {
+        icon: '👨‍💼',
+        title: 'Đăng ký Admin',
+        description:
+          'Admin cần mã đăng ký do hệ thống SmartLocker cấp.',
+        target: 'Admin',
+      };
+    }
+
+    if (role === 'SHIPPER') {
+      return {
+        icon: '🚚',
+        title: 'Đăng ký Shipper',
+        description:
+          'Shipper cần mã giới thiệu để được phép tạo đơn giao hàng.',
+        target: 'Shipper',
+      };
+    }
+
+    return {
+      icon: '🏠',
+      title: 'Đăng ký Cư dân',
+      description:
+        'Tạo tài khoản bằng số điện thoại để nhận kiện hàng và thông báo.',
+      target: 'Resident',
+    };
+  }, [role]);
 
   const handleRegister = async () => {
     if (!/^0\d{9}$/.test(phone)) {
@@ -90,6 +103,14 @@ export default function RegisterScreen({
       return;
     }
 
+    if (role === 'SHIPPER' && !shipperCode.trim()) {
+      Alert.alert(
+        'Thiếu mã giới thiệu',
+        'Vui lòng nhập mã giới thiệu Shipper.',
+      );
+      return;
+    }
+
     setLoading(true);
 
     try {
@@ -98,6 +119,8 @@ export default function RegisterScreen({
         password,
         role,
         adminCode: role === 'ADMIN' ? adminCode.trim() : undefined,
+        shipperCode:
+          role === 'SHIPPER' ? shipperCode.trim() : undefined,
       });
 
       Alert.alert(
@@ -217,6 +240,29 @@ export default function RegisterScreen({
                 <View style={styles.adminNotice}>
                   <Text style={styles.adminNoticeText}>
                     🔐 Mã Admin sẽ được backend kiểm tra. Không lưu mã này trong tài khoản sau khi đăng ký.
+                  </Text>
+                </View>
+              </>
+            )}
+
+            {role === 'SHIPPER' && (
+              <>
+                <Text style={styles.label}>
+                  Mã giới thiệu Shipper
+                </Text>
+                <TextInput
+                  style={styles.input}
+                  value={shipperCode}
+                  onChangeText={setShipperCode}
+                  placeholder="Nhập mã giới thiệu"
+                  keyboardType="number-pad"
+                  maxLength={6}
+                  secureTextEntry
+                />
+
+                <View style={styles.shipperNotice}>
+                  <Text style={styles.shipperNoticeText}>
+                    🚚 Chỉ Shipper có mã hợp lệ mới được tạo tài khoản và sử dụng chức năng giao hàng.
                   </Text>
                 </View>
               </>
@@ -369,6 +415,18 @@ const styles = StyleSheet.create({
   },
   adminNoticeText: {
     color: '#8A6723',
+    fontSize: 12,
+    lineHeight: 17,
+  },
+  shipperNotice: {
+    backgroundColor: '#FFF4E6',
+    borderRadius: 10,
+    padding: 11,
+    marginTop: -5,
+    marginBottom: 16,
+  },
+  shipperNoticeText: {
+    color: '#9A5B13',
     fontSize: 12,
     lineHeight: 17,
   },

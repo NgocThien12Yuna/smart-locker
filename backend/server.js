@@ -28,6 +28,7 @@ app.use(express.json());
 
 const PORT = Number(process.env.PORT || 3000);
 const JWT_SECRET = process.env.JWT_SECRET;
+const SHIPPER_REGISTER_CODE = process.env.SHIPPER_REGISTER_CODE;
 
 if (!JWT_SECRET) {
   throw new Error('Thiếu JWT_SECRET trong file .env');
@@ -932,6 +933,13 @@ app.post(
             '',
         );
 
+      const shipperCode =
+        String(
+          req.body
+            .shipperCode ||
+            '',
+        );
+
       if (
         !isValidVietnamPhone(
           phone,
@@ -963,6 +971,7 @@ app.post(
         ![
           'ADMIN',
           'RESIDENT',
+          'SHIPPER',
         ].includes(role)
       ) {
         return res
@@ -990,6 +999,23 @@ app.post(
               ok: false,
               message:
                 'Mã đăng ký Admin không đúng.',
+            });
+        }
+      }
+
+      if (
+        role === 'SHIPPER'
+      ) {
+        if (
+          !SHIPPER_REGISTER_CODE ||
+          shipperCode !== SHIPPER_REGISTER_CODE
+        ) {
+          return res
+            .status(403)
+            .json({
+              ok: false,
+              message:
+                'Mã giới thiệu Shipper không đúng.',
             });
         }
       }
@@ -1419,14 +1445,26 @@ app.get(
 );
 
 // ======================================================
-// CREATE PACKAGE - SHIPPER KHÔNG ĐĂNG NHẬP
+// CREATE PACKAGE - CHỈ SHIPPER ĐÃ ĐĂNG NHẬP
 // ======================================================
 //
-// Backend tự cấp tủ. Shipper không còn hard-code A01.
+// Backend bắt JWT và role SHIPPER, nên không thể bypass chỉ bằng URL.
 
 app.post(
   '/packages',
+  authMiddleware,
   async (req, res) => {
+    if (
+      req.user?.role !== 'SHIPPER'
+    ) {
+      return res
+        .status(403)
+        .json({
+          ok: false,
+          message:
+            'Chỉ tài khoản Shipper mới được tạo đơn giao hàng.',
+        });
+    }
     try {
       const receiverPhone =
         normalizePhone(
@@ -1440,10 +1478,7 @@ app.post(
         );
 
       const sender =
-        String(
-          req.body.sender ||
-            'Shipper',
-        ).trim();
+        `Shipper ${req.user.phone}`;
 
       if (
         !isValidVietnamPhone(
@@ -2395,7 +2430,15 @@ app.listen(
     );
 
     console.log(
-      '✅ Auth + Auto Locker + Secure OTP + Admin ready',
+      `🚚 Shipper register code: ${
+        SHIPPER_REGISTER_CODE
+          ? 'READY'
+          : 'MISSING'
+      }`,
+    );
+
+    console.log(
+      '✅ Auth + Auto Locker + Secure OTP + Admin + Shipper Auth ready',
     );
 
     console.log(

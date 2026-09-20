@@ -8,7 +8,7 @@
 //
 // Sau khi chạy `ipconfig`, thay giá trị bên dưới bằng IP thật của bạn.
 export const API_BASE_URL =
-  'http://127.0.0.1:3000';
+  'https://smart-locker-production-a28c.up.railway.app';
 
 console.log(
   '🌐 API_BASE_URL =',

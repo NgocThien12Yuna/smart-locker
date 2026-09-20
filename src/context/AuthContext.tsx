@@ -36,6 +36,7 @@ type LoginInput = {
 
 type RegisterInput = LoginInput & {
   adminCode?: string;
+  shipperCode?: string;
 };
 
 type ContinueResult =
@@ -105,7 +106,8 @@ export const AuthProvider: React.FC<{
             item &&
             typeof item.phone === 'string' &&
             (item.role === 'ADMIN' ||
-              item.role === 'RESIDENT') &&
+              item.role === 'RESIDENT' ||
+              item.role === 'SHIPPER') &&
             typeof item.token === 'string',
         ) as RememberedAccount[];
 

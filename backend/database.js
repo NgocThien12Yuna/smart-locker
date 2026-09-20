@@ -44,13 +44,67 @@ db.pragma('foreign_keys = ON');
 // ======================================================
 // USERS
 // ======================================================
+//
+// DB cũ chỉ cho ADMIN/RESIDENT.
+// Migration dưới đây thêm SHIPPER nhưng giữ nguyên tài khoản cũ.
+
+const usersTable = db
+  .prepare(`
+    SELECT sql
+    FROM sqlite_master
+    WHERE type = 'table'
+      AND name = 'users'
+  `)
+  .get();
+
+const usersNeedShipperMigration =
+  usersTable?.sql &&
+  !/SHIPPER/i.test(usersTable.sql);
+
+if (usersNeedShipperMigration) {
+  console.log('♻️ Migrating users table: add SHIPPER role...');
+
+  db.pragma('foreign_keys = OFF');
+
+  const migrateUsers = db.transaction(() => {
+    db.exec(`
+      CREATE TABLE users_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        phone TEXT NOT NULL,
+        password_hash TEXT NOT NULL,
+        role TEXT NOT NULL
+          CHECK(role IN ('ADMIN', 'RESIDENT', 'SHIPPER')),
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(phone, role)
+      );
+
+      INSERT INTO users_new (
+        id, phone, password_hash, role, created_at
+      )
+      SELECT
+        id, phone, password_hash, role, created_at
+      FROM users;
+
+      DROP TABLE users;
+
+      ALTER TABLE users_new
+      RENAME TO users;
+    `);
+  });
+
+  migrateUsers();
+  db.pragma('foreign_keys = ON');
+
+  console.log('✅ users migration complete: SHIPPER enabled.');
+}
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     phone TEXT NOT NULL,
     password_hash TEXT NOT NULL,
-    role TEXT NOT NULL CHECK(role IN ('ADMIN', 'RESIDENT')),
+    role TEXT NOT NULL
+      CHECK(role IN ('ADMIN', 'RESIDENT', 'SHIPPER')),
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(phone, role)
   );
