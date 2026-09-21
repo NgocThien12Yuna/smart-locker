@@ -667,6 +667,7 @@ Chỉ khi ESP32 phản hồi mở khóa thành công thì backend mới cập nh
 ## 15. Lưu ý bảo mật
 
 Không commit các file sau lên GitHub:
+file
 
 ```text
 .env
