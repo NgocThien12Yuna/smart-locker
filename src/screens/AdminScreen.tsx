@@ -224,6 +224,83 @@ export default function AdminScreen({
       );
     };
 
+  const waitForHardwareCommand =
+    async (
+      commandId: number,
+      timeoutMs = 45000,
+    ) => {
+      if (!currentToken) {
+        throw new Error(
+          'Không có phiên Admin.',
+        );
+      }
+
+      const startedAt =
+        Date.now();
+
+      while (
+        Date.now() -
+          startedAt <
+        timeoutMs
+      ) {
+        const response =
+          await fetch(
+            `${API_BASE_URL}/hardware/commands/${commandId}/status`,
+            {
+              headers: {
+                Authorization:
+                  `Bearer ${currentToken}`,
+              },
+            },
+          );
+
+        const data =
+          await response.json();
+
+        if (
+          !response.ok ||
+          !data?.ok
+        ) {
+          throw new Error(
+            data?.message ||
+              `HTTP ${response.status}`,
+          );
+        }
+
+        const status =
+          data.command
+            ?.status;
+
+        if (
+          status === 'DONE'
+        ) {
+          return data.command;
+        }
+
+        if (
+          status === 'FAILED'
+        ) {
+          throw new Error(
+            data.command
+              ?.errorMessage ||
+              'ESP32 báo mở tủ thất bại.',
+          );
+        }
+
+        await new Promise(
+          resolve =>
+            setTimeout(
+              resolve,
+              1000,
+            ),
+        );
+      }
+
+      throw new Error(
+        'ESP32 chưa phản hồi sau 45 giây.',
+      );
+    };
+
   const forceOpen =
     async (
       locker: LockerItem,
@@ -234,7 +311,7 @@ export default function AdminScreen({
       if (!pkg) {
         Alert.alert(
           'Kiểm tra khóa',
-          `${locker.name} đang trống.\n\nSOFTWARE MODE: khóa sẵn sàng.`,
+          `${locker.name} đang trống.`,
         );
         return;
       }
@@ -292,14 +369,26 @@ export default function AdminScreen({
                   );
                 }
 
-                Alert.alert(
-                  'Đã mở khẩn cấp',
-                  `${data.message}\n\nChế độ: ${
-                    data.hardwareMode
-                      ? 'PHẦN CỨNG'
-                      : 'SOFTWARE MODE'
-                  }`,
-                );
+                if (
+                  data.hardwareMode &&
+                  data.commandId
+                ) {
+                  await waitForHardwareCommand(
+                    Number(
+                      data.commandId,
+                    ),
+                  );
+
+                  Alert.alert(
+                    'Đã mở khẩn cấp',
+                    `ESP32 đã xác nhận mở ${locker.name}.`,
+                  );
+                } else {
+                  Alert.alert(
+                    'Đã mở khẩn cấp',
+                    `${data.message}\n\nChế độ: SOFTWARE MODE`,
+                  );
+                }
 
                 await loadOverview(
                   true,
@@ -310,7 +399,7 @@ export default function AdminScreen({
                 Alert.alert(
                   'Không mở được tủ',
                   error?.message ||
-                    'Có lỗi khi mở khẩn cấp.',
+                    'Có lỗi khi mở khẩn cấp hoặc ESP32 chưa phản hồi.',
                 );
               } finally {
                 setOpeningId(

@@ -63,6 +63,52 @@ const OTP_TTL_MINUTES = Number(
   process.env.OTP_TTL_MINUTES || 15,
 );
 
+
+// ======================================================
+// ESP32 HARDWARE MODE
+// ======================================================
+//
+// SOFTWARE: giữ hành vi mô phỏng cũ.
+// ESP32: Resident/Admin tạo lệnh hardware_commands và chờ ESP32 ACK.
+//
+// Railway Variables khuyên dùng:
+// HARDWARE_MODE=ESP32
+// ESP_DEVICE_KEY=<chuỗi bí mật dài>
+// ESP_DEVICE_ID=ESP32-LOCKER-01
+// HARDWARE_COMMAND_STALE_SECONDS=30
+
+const HARDWARE_MODE =
+  String(
+    process.env.HARDWARE_MODE ||
+      'SOFTWARE',
+  )
+    .trim()
+    .toUpperCase();
+
+const ESP_DEVICE_KEY =
+  String(
+    process.env.ESP_DEVICE_KEY ||
+      '',
+  ).trim();
+
+const DEFAULT_ESP_DEVICE_ID =
+  String(
+    process.env.ESP_DEVICE_ID ||
+      'ESP32-LOCKER-01',
+  ).trim();
+
+const HARDWARE_COMMAND_STALE_SECONDS =
+  Math.max(
+    10,
+    Number(
+      process.env.HARDWARE_COMMAND_STALE_SECONDS ||
+        30,
+    ),
+  );
+
+const isEsp32Mode = () =>
+  HARDWARE_MODE === 'ESP32';
+
 // ======================================================
 // FIREBASE ADMIN
 // ======================================================
@@ -603,6 +649,541 @@ const addActivityLog = ({
   );
 };
 
+
+const requireEspHardwareConfigured = (
+  res,
+) => {
+  if (!isEsp32Mode()) {
+    res.status(409).json({
+      ok: false,
+      message:
+        'Backend hiện đang ở SOFTWARE MODE. Hãy đặt HARDWARE_MODE=ESP32 trên Railway.',
+    });
+    return false;
+  }
+
+  if (!ESP_DEVICE_KEY) {
+    res.status(503).json({
+      ok: false,
+      message:
+        'Thiếu ESP_DEVICE_KEY trên Railway Variables.',
+    });
+    return false;
+  }
+
+  return true;
+};
+
+const hardwareAuthMiddleware = (
+  req,
+  res,
+  next,
+) => {
+  if (
+    !requireEspHardwareConfigured(
+      res,
+    )
+  ) {
+    return;
+  }
+
+  const deviceKey =
+    String(
+      req.headers[
+        'x-device-key'
+      ] || '',
+    ).trim();
+
+  if (
+    !deviceKey ||
+    deviceKey !==
+      ESP_DEVICE_KEY
+  ) {
+    return res
+      .status(401)
+      .json({
+        ok: false,
+        message:
+          'ESP device key không hợp lệ.',
+      });
+  }
+
+  req.hardwareDeviceId =
+    String(
+      req.headers[
+        'x-device-id'
+      ] ||
+        DEFAULT_ESP_DEVICE_ID,
+    ).trim();
+
+  next();
+};
+
+const getActiveHardwareCommand =
+  packagePublicId => {
+    return db
+      .prepare(`
+        SELECT *
+        FROM hardware_commands
+        WHERE package_public_id = ?
+          AND status IN (
+            'PENDING',
+            'CLAIMED'
+          )
+        ORDER BY id DESC
+        LIMIT 1
+      `)
+      .get(
+        packagePublicId,
+      );
+  };
+
+const queueOpenCommand = ({
+  packageRow,
+  requestedBy,
+  requestedByUserId,
+}) => {
+  const existing =
+    getActiveHardwareCommand(
+      packageRow.public_id,
+    );
+
+  if (existing) {
+    return existing;
+  }
+
+  try {
+    const result =
+      db.prepare(`
+        INSERT INTO hardware_commands (
+          package_public_id,
+          action,
+          locker,
+          requested_by,
+          requested_by_user_id,
+          status
+        )
+        VALUES (
+          ?, 'OPEN', ?, ?, ?, 'PENDING'
+        )
+      `).run(
+        packageRow.public_id,
+        packageRow.locker,
+        requestedBy,
+        requestedByUserId ||
+          null,
+      );
+
+    return db
+      .prepare(`
+        SELECT *
+        FROM hardware_commands
+        WHERE id = ?
+      `)
+      .get(
+        Number(
+          result.lastInsertRowid,
+        ),
+      );
+  } catch (error) {
+    // Partial UNIQUE index chống double-tap/race.
+    const active =
+      getActiveHardwareCommand(
+        packageRow.public_id,
+      );
+
+    if (active) {
+      return active;
+    }
+
+    throw error;
+  }
+};
+
+const mapHardwareCommand = row =>
+  row
+    ? {
+        id: row.id,
+        packageId:
+          row.package_public_id,
+        action: row.action,
+        locker: row.locker,
+        requestedBy:
+          row.requested_by,
+        status: row.status,
+        deviceId:
+          row.device_id,
+        attempts:
+          row.attempts,
+        createdAt:
+          row.created_at,
+        claimedAt:
+          row.claimed_at,
+        completedAt:
+          row.completed_at,
+        errorMessage:
+          row.error_message,
+      }
+    : null;
+
+const userCanViewHardwareCommand = (
+  req,
+  commandRow,
+) => {
+  if (
+    req.user?.role ===
+    'ADMIN'
+  ) {
+    return true;
+  }
+
+  if (
+    req.user?.role !==
+    'RESIDENT'
+  ) {
+    return false;
+  }
+
+  const pkg =
+    db.prepare(`
+      SELECT receiver_user_id
+      FROM packages
+      WHERE public_id = ?
+    `).get(
+      commandRow
+        .package_public_id,
+    );
+
+  return (
+    pkg &&
+    Number(
+      pkg.receiver_user_id,
+    ) ===
+      Number(
+        req.user.userId,
+      )
+  );
+};
+
+const resetStaleHardwareClaims =
+  () => {
+    db.prepare(`
+      UPDATE hardware_commands
+      SET
+        status = 'PENDING',
+        device_id = NULL,
+        claimed_at = NULL,
+        error_message =
+          'ESP claim timeout - returned to queue'
+      WHERE status = 'CLAIMED'
+        AND claimed_at IS NOT NULL
+        AND datetime(claimed_at)
+          <= datetime(
+            'now',
+            '-' || ? || ' seconds'
+          )
+    `).run(
+      HARDWARE_COMMAND_STALE_SECONDS,
+    );
+  };
+
+const claimNextHardwareCommand =
+  db.transaction(
+    deviceId => {
+      resetStaleHardwareClaims();
+
+      const row =
+        db.prepare(`
+          SELECT *
+          FROM hardware_commands
+          WHERE status = 'PENDING'
+          ORDER BY id ASC
+          LIMIT 1
+        `).get();
+
+      if (!row) {
+        return null;
+      }
+
+      const updated =
+        db.prepare(`
+          UPDATE hardware_commands
+          SET
+            status = 'CLAIMED',
+            device_id = ?,
+            claimed_at =
+              CURRENT_TIMESTAMP,
+            attempts =
+              attempts + 1,
+            error_message = NULL
+          WHERE id = ?
+            AND status = 'PENDING'
+        `).run(
+          deviceId,
+          row.id,
+        );
+
+      if (
+        updated.changes !== 1
+      ) {
+        return null;
+      }
+
+      return db
+        .prepare(`
+          SELECT *
+          FROM hardware_commands
+          WHERE id = ?
+        `).get(
+          row.id,
+        );
+    },
+  );
+
+const finalizeHardwareCommand =
+  db.transaction(
+    ({
+      commandId,
+      deviceId,
+      success,
+      message,
+    }) => {
+      const command =
+        db.prepare(`
+          SELECT *
+          FROM hardware_commands
+          WHERE id = ?
+        `).get(
+          commandId,
+        );
+
+      if (!command) {
+        return {
+          kind: 'NOT_FOUND',
+        };
+      }
+
+      if (
+        command.status ===
+        'DONE'
+      ) {
+        return {
+          kind:
+            'ALREADY_DONE',
+          command,
+        };
+      }
+
+      if (
+        command.status ===
+        'FAILED'
+      ) {
+        return {
+          kind:
+            'ALREADY_FAILED',
+          command,
+        };
+      }
+
+      if (
+        command.device_id &&
+        command.device_id !==
+          deviceId
+      ) {
+        return {
+          kind:
+            'DEVICE_MISMATCH',
+          command,
+        };
+      }
+
+      if (!success) {
+        db.prepare(`
+          UPDATE hardware_commands
+          SET
+            status = 'FAILED',
+            device_id =
+              COALESCE(
+                device_id,
+                ?
+              ),
+            completed_at =
+              CURRENT_TIMESTAMP,
+            error_message = ?
+          WHERE id = ?
+        `).run(
+          deviceId,
+          message ||
+            'ESP32 báo mở tủ thất bại.',
+          command.id,
+        );
+
+        return {
+          kind: 'FAILED',
+          command:
+            db.prepare(`
+              SELECT *
+              FROM hardware_commands
+              WHERE id = ?
+            `).get(
+              command.id,
+            ),
+        };
+      }
+
+      const packageRow =
+        db.prepare(`
+          SELECT *
+          FROM packages
+          WHERE public_id = ?
+        `).get(
+          command.package_public_id,
+        );
+
+      if (!packageRow) {
+        db.prepare(`
+          UPDATE hardware_commands
+          SET
+            status = 'FAILED',
+            completed_at =
+              CURRENT_TIMESTAMP,
+            error_message =
+              'Package không còn tồn tại.'
+          WHERE id = ?
+        `).run(
+          command.id,
+        );
+
+        return {
+          kind:
+            'PACKAGE_NOT_FOUND',
+        };
+      }
+
+      // Nếu package đã được xử lý trước đó,
+      // ACK được xem là idempotent.
+      if (
+        packageRow.status !==
+        'READY'
+      ) {
+        db.prepare(`
+          UPDATE hardware_commands
+          SET
+            status = 'DONE',
+            device_id =
+              COALESCE(
+                device_id,
+                ?
+              ),
+            completed_at =
+              CURRENT_TIMESTAMP,
+            error_message = NULL
+          WHERE id = ?
+        `).run(
+          deviceId,
+          command.id,
+        );
+
+        return {
+          kind:
+            'PACKAGE_ALREADY_FINAL',
+          command:
+            db.prepare(`
+              SELECT *
+              FROM hardware_commands
+              WHERE id = ?
+            `).get(
+              command.id,
+            ),
+          packageRow,
+        };
+      }
+
+      // Chỉ sau khi ESP32 ACK thành công mới đánh dấu PICKED_UP.
+      db.prepare(`
+        UPDATE packages
+        SET
+          status = 'PICKED_UP',
+          picked_up_at =
+            CURRENT_TIMESTAMP,
+
+          pickup_otp = NULL,
+          pickup_otp_hash = NULL,
+          pickup_otp_enc = NULL,
+          pickup_otp_iv = NULL,
+          pickup_otp_tag = NULL,
+          otp_expires_at = NULL
+
+        WHERE id = ?
+          AND status = 'READY'
+      `).run(
+        packageRow.id,
+      );
+
+      db.prepare(`
+        UPDATE hardware_commands
+        SET
+          status = 'DONE',
+          device_id =
+            COALESCE(
+              device_id,
+              ?
+            ),
+          completed_at =
+            CURRENT_TIMESTAMP,
+          error_message = NULL
+        WHERE id = ?
+      `).run(
+        deviceId,
+        command.id,
+      );
+
+      if (
+        command.requested_by ===
+        'ADMIN'
+      ) {
+        addActivityLog({
+          eventKey:
+            `FORCE_OPEN:${packageRow.public_id}`,
+          action:
+            'MỞ KHẨN CẤP',
+          packageId:
+            packageRow.public_id,
+          phone:
+            packageRow.receiver_phone,
+          locker:
+            packageRow.locker,
+        });
+      } else {
+        addActivityLog({
+          eventKey:
+            `PACKAGE_PICKED_UP:${packageRow.public_id}`,
+          action:
+            'NHẬN HÀNG',
+          packageId:
+            packageRow.public_id,
+          phone:
+            packageRow.receiver_phone,
+          locker:
+            packageRow.locker,
+        });
+      }
+
+      return {
+        kind: 'DONE',
+        command:
+          db.prepare(`
+            SELECT *
+            FROM hardware_commands
+            WHERE id = ?
+          `).get(
+            command.id,
+          ),
+        packageRow,
+      };
+    },
+  );
+
 const ensureLegacyOtpMigrated =
   row => {
     if (
@@ -897,6 +1478,12 @@ app.get(
         OTP_TTL_MINUTES,
       lockers:
         ALL_LOCKERS.length,
+      hardwareMode:
+        HARDWARE_MODE,
+      espConfigured:
+        !!ESP_DEVICE_KEY,
+      hardwareCommandStaleSeconds:
+        HARDWARE_COMMAND_STALE_SECONDS,
     });
   },
 );
@@ -1840,9 +2427,13 @@ app.post(
 // RESIDENT - REDEEM OTP / OPEN LOCKER
 // ======================================================
 //
-// HIỆN TẠI: SOFTWARE MODE.
-// Sau này thay block mở tủ bằng HTTP/MQTT tới ESP32.
-// Chỉ khi ESP32 phản hồi thành công mới UPDATE PICKED_UP.
+// SOFTWARE MODE:
+//   xác minh OTP -> PICKED_UP ngay như bản cũ.
+//
+// ESP32 MODE:
+//   xác minh OTP -> queue OPEN command.
+//   package vẫn READY.
+//   chỉ khi ESP32 POST complete success -> PICKED_UP.
 
 app.post(
   '/packages/:packageId/redeem',
@@ -1965,8 +2556,58 @@ app.post(
           });
       }
 
-      // SOFTWARE MODE:
-      // Sau này: gửi lệnh ESP32 trước, thành công rồi mới update.
+      // ================================================
+      // ESP32 MODE
+      // ================================================
+      if (isEsp32Mode()) {
+        if (
+          !ESP_DEVICE_KEY
+        ) {
+          return res
+            .status(503)
+            .json({
+              ok: false,
+              message:
+                'Backend đang ở ESP32 MODE nhưng chưa cấu hình ESP_DEVICE_KEY.',
+            });
+        }
+
+        const command =
+          queueOpenCommand({
+            packageRow,
+            requestedBy:
+              'RESIDENT',
+            requestedByUserId:
+              req.user.userId,
+          });
+
+        console.log(
+          `📡 QUEUE OPEN: command=${command.id} locker=${packageRow.locker} package=${packageRow.public_id}`,
+        );
+
+        return res.json({
+          ok: true,
+          hardwareMode: true,
+          mode: 'ESP32',
+          locker:
+            packageRow.locker,
+          packageId:
+            packageRow
+              .public_id,
+          commandId:
+            command.id,
+          commandStatus:
+            command.status,
+          status:
+            'WAITING_HARDWARE',
+          message:
+            `OTP hợp lệ. Đã gửi yêu cầu mở tủ ${packageRow.locker} tới ESP32.`,
+        });
+      }
+
+      // ================================================
+      // SOFTWARE MODE - giữ tương thích bản cũ
+      // ================================================
       const updateResult =
         db.prepare(`
           UPDATE packages
@@ -2044,6 +2685,287 @@ app.post(
           ok: false,
           message:
             'Lỗi server khi xác minh OTP.',
+        });
+    }
+  },
+);
+
+// ======================================================
+// LOGGED-IN USER - HARDWARE COMMAND STATUS
+// ======================================================
+//
+// Resident chỉ xem command thuộc package của chính mình.
+// Admin có thể xem mọi command.
+
+app.get(
+  '/hardware/commands/:commandId/status',
+  authMiddleware,
+  (req, res) => {
+    try {
+      const commandId =
+        Number(
+          req.params
+            .commandId,
+        );
+
+      if (
+        !Number.isInteger(
+          commandId,
+        ) ||
+        commandId <= 0
+      ) {
+        return res
+          .status(400)
+          .json({
+            ok: false,
+            message:
+              'commandId không hợp lệ.',
+          });
+      }
+
+      const command =
+        db.prepare(`
+          SELECT *
+          FROM hardware_commands
+          WHERE id = ?
+        `).get(
+          commandId,
+        );
+
+      if (!command) {
+        return res
+          .status(404)
+          .json({
+            ok: false,
+            message:
+              'Không tìm thấy lệnh phần cứng.',
+          });
+      }
+
+      if (
+        !userCanViewHardwareCommand(
+          req,
+          command,
+        )
+      ) {
+        return res
+          .status(403)
+          .json({
+            ok: false,
+            message:
+              'Bạn không có quyền xem lệnh này.',
+          });
+      }
+
+      return res.json({
+        ok: true,
+        command:
+          mapHardwareCommand(
+            command,
+          ),
+      });
+    } catch (error) {
+      console.error(
+        'HARDWARE STATUS ERROR:',
+        error,
+      );
+
+      return res
+        .status(500)
+        .json({
+          ok: false,
+          message:
+            'Lỗi server khi đọc trạng thái lệnh phần cứng.',
+        });
+    }
+  },
+);
+
+// ======================================================
+// ESP32 - PING
+// ======================================================
+
+app.get(
+  '/hardware/ping',
+  hardwareAuthMiddleware,
+  (req, res) => {
+    return res.json({
+      ok: true,
+      hardwareMode:
+        HARDWARE_MODE,
+      deviceId:
+        req.hardwareDeviceId,
+      serverTime:
+        new Date().toISOString(),
+      message:
+        'ESP32 authenticated with SmartLocker backend.',
+    });
+  },
+);
+
+// ======================================================
+// ESP32 - GET / CLAIM NEXT COMMAND
+// ======================================================
+
+app.get(
+  '/hardware/commands/next',
+  hardwareAuthMiddleware,
+  (req, res) => {
+    try {
+      const command =
+        claimNextHardwareCommand(
+          req.hardwareDeviceId,
+        );
+
+      return res.json({
+        ok: true,
+        command:
+          mapHardwareCommand(
+            command,
+          ),
+      });
+    } catch (error) {
+      console.error(
+        'ESP NEXT COMMAND ERROR:',
+        error,
+      );
+
+      return res
+        .status(500)
+        .json({
+          ok: false,
+          message:
+            'Lỗi server khi ESP32 lấy lệnh.',
+        });
+    }
+  },
+);
+
+// ======================================================
+// ESP32 - COMPLETE COMMAND
+// ======================================================
+
+app.post(
+  '/hardware/commands/:commandId/complete',
+  hardwareAuthMiddleware,
+  (req, res) => {
+    try {
+      const commandId =
+        Number(
+          req.params
+            .commandId,
+        );
+
+      if (
+        !Number.isInteger(
+          commandId,
+        ) ||
+        commandId <= 0
+      ) {
+        return res
+          .status(400)
+          .json({
+            ok: false,
+            message:
+              'commandId không hợp lệ.',
+          });
+      }
+
+      const success =
+        req.body.success ===
+        true;
+
+      const message =
+        String(
+          req.body.message ||
+            '',
+        )
+          .trim()
+          .slice(
+            0,
+            500,
+          );
+
+      const result =
+        finalizeHardwareCommand({
+          commandId,
+          deviceId:
+            req.hardwareDeviceId,
+          success,
+          message,
+        });
+
+      if (
+        result.kind ===
+        'NOT_FOUND'
+      ) {
+        return res
+          .status(404)
+          .json({
+            ok: false,
+            message:
+              'Không tìm thấy lệnh.',
+          });
+      }
+
+      if (
+        result.kind ===
+        'DEVICE_MISMATCH'
+      ) {
+        return res
+          .status(409)
+          .json({
+            ok: false,
+            message:
+              'Lệnh đang được claim bởi ESP32 khác.',
+          });
+      }
+
+      if (
+        result.kind ===
+        'PACKAGE_NOT_FOUND'
+      ) {
+        return res
+          .status(409)
+          .json({
+            ok: false,
+            message:
+              'Package của lệnh không còn tồn tại.',
+          });
+      }
+
+      const latest =
+        db.prepare(`
+          SELECT *
+          FROM hardware_commands
+          WHERE id = ?
+        `).get(
+          commandId,
+        );
+
+      return res.json({
+        ok: true,
+        command:
+          mapHardwareCommand(
+            latest,
+          ),
+        message:
+          success
+            ? 'Đã ACK mở tủ thành công.'
+            : 'Đã ghi nhận lỗi mở tủ.',
+      });
+    } catch (error) {
+      console.error(
+        'ESP COMPLETE COMMAND ERROR:',
+        error,
+      );
+
+      return res
+        .status(500)
+        .json({
+          ok: false,
+          message:
+            'Lỗi server khi ESP32 hoàn tất lệnh.',
         });
     }
   },
@@ -2249,8 +3171,11 @@ app.get(
 );
 
 // ======================================================
-// ADMIN - FORCE OPEN (SOFTWARE MODE)
+// ADMIN - FORCE OPEN
 // ======================================================
+//
+// SOFTWARE MODE: hoàn tất ngay.
+// ESP32 MODE: queue OPEN command và chờ ESP32 ACK.
 
 app.post(
   '/admin/packages/:packageId/force-open',
@@ -2303,6 +3228,47 @@ app.post(
             message:
               'Kiện hàng không còn ở trạng thái chờ lấy.',
           });
+      }
+
+      if (isEsp32Mode()) {
+        if (
+          !ESP_DEVICE_KEY
+        ) {
+          return res
+            .status(503)
+            .json({
+              ok: false,
+              message:
+                'Backend đang ở ESP32 MODE nhưng chưa cấu hình ESP_DEVICE_KEY.',
+            });
+        }
+
+        const command =
+          queueOpenCommand({
+            packageRow,
+            requestedBy:
+              'ADMIN',
+            requestedByUserId:
+              req.user.userId,
+          });
+
+        console.log(
+          `⚠️ ADMIN QUEUE OPEN: command=${command.id} locker=${packageRow.locker}`,
+        );
+
+        return res.json({
+          ok: true,
+          hardwareMode: true,
+          mode: 'ESP32',
+          commandId:
+            command.id,
+          commandStatus:
+            command.status,
+          locker:
+            packageRow.locker,
+          message:
+            `Đã gửi yêu cầu mở khẩn cấp tủ ${packageRow.locker} tới ESP32.`,
+        });
       }
 
       const result =
@@ -2412,6 +3378,19 @@ app.listen(
 
     console.log(
       `⏱️ OTP TTL: ${OTP_TTL_MINUTES} phút`,
+    );
+
+
+    console.log(
+      `🔌 Hardware mode: ${HARDWARE_MODE}`,
+    );
+
+    console.log(
+      `📟 ESP configured: ${
+        ESP_DEVICE_KEY
+          ? 'YES'
+          : 'NO'
+      }`,
     );
 
     console.log(

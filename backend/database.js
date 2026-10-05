@@ -301,6 +301,60 @@ db.exec(`
     AND picked_up_at IS NOT NULL;
 `);
 
+
+// ======================================================
+// HARDWARE COMMANDS - ESP32
+// ======================================================
+//
+// App/Backend không gọi ESP32 trực tiếp.
+// Backend tạo lệnh PENDING trong bảng này.
+// ESP32 poll Railway -> CLAIMED -> thực thi relay -> ACK DONE/FAILED.
+//
+// package vẫn READY cho tới khi ESP32 ACK thành công.
+// Như vậy nếu ESP32 mất Wi-Fi / relay lỗi thì hệ thống KHÔNG đánh dấu
+// kiện hàng đã nhận nhầm.
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS hardware_commands (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+    package_public_id TEXT NOT NULL,
+    action TEXT NOT NULL DEFAULT 'OPEN'
+      CHECK(action IN ('OPEN')),
+
+    locker TEXT NOT NULL,
+
+    requested_by TEXT NOT NULL
+      CHECK(requested_by IN ('RESIDENT', 'ADMIN')),
+
+    requested_by_user_id INTEGER,
+
+    status TEXT NOT NULL DEFAULT 'PENDING'
+      CHECK(status IN ('PENDING', 'CLAIMED', 'DONE', 'FAILED')),
+
+    device_id TEXT,
+    attempts INTEGER NOT NULL DEFAULT 0,
+
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    claimed_at TEXT,
+    completed_at TEXT,
+
+    error_message TEXT
+  );
+`);
+
+db.exec(`
+  CREATE INDEX IF NOT EXISTS idx_hardware_commands_status
+  ON hardware_commands(status, id);
+
+  CREATE INDEX IF NOT EXISTS idx_hardware_commands_package
+  ON hardware_commands(package_public_id, id DESC);
+
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_hardware_commands_one_active_per_package
+  ON hardware_commands(package_public_id)
+  WHERE status IN ('PENDING', 'CLAIMED');
+`);
+
 console.log('✅ SQLite database ready:', dbPath);
 console.log(
   '💾 Persistent volume:',
