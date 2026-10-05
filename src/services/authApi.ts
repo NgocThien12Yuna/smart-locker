@@ -1,6 +1,13 @@
 import { API_BASE_URL } from '../config/api';
 
-export type UserRole = 'ADMIN' | 'RESIDENT' | 'SHIPPER';
+// ============================================================
+// TYPES
+// ============================================================
+
+export type UserRole =
+  | 'ADMIN'
+  | 'RESIDENT'
+  | 'SHIPPER';
 
 export type AuthUser = {
   id: number;
@@ -16,18 +23,39 @@ export type AuthResponse = {
   user: AuthUser;
 };
 
+// ============================================================
+// API ERROR
+// ============================================================
+
 export class ApiError extends Error {
   status: number;
 
-  constructor(message: string, status = 0) {
+  constructor(
+    message: string,
+    status = 0,
+  ) {
     super(message);
+
     this.name = 'ApiError';
     this.status = status;
   }
 }
 
-const parseJsonSafe = async (response: Response) => {
-  const text = await response.text();
+// ============================================================
+// CONFIG
+// ============================================================
+
+const REQUEST_TIMEOUT_MS = 12000;
+
+// ============================================================
+// HELPERS
+// ============================================================
+
+const parseJsonSafe = async (
+  response: Response,
+) => {
+  const text =
+    await response.text();
 
   if (!text) {
     return {};
@@ -47,130 +75,244 @@ const request = async (
   path: string,
   options: RequestInit = {},
 ) => {
-  let response: Response;
+  const url =
+    `${API_BASE_URL}${path}`;
+
+  const controller =
+    new AbortController();
+
+  const timeoutId =
+    setTimeout(
+      () =>
+        controller.abort(),
+      REQUEST_TIMEOUT_MS,
+    );
+
+  console.log(
+    '==============================',
+  );
+
+  console.log(
+    '🌐 AUTH REQUEST =',
+    url,
+  );
+
+  console.log(
+    '🌐 METHOD =',
+    options.method || 'GET',
+  );
+
+  console.log(
+    '==============================',
+  );
 
   try {
-    response = await fetch(`${API_BASE_URL}${path}`, {
-      ...options,
-      headers: {
-        'Content-Type': 'application/json',
-        ...(options.headers || {}),
-      },
-    });
-  } catch (error) {
-    console.error('AUTH NETWORK ERROR:', error);
+    const response =
+      await fetch(
+        url,
+        {
+          ...options,
 
-    throw new ApiError(
-      'Không kết nối được SmartLocker Backend. Kiểm tra Internet và backend Railway.',
-      0,
-    );
-  }
+          signal:
+            controller.signal,
 
-  const data = await parseJsonSafe(response);
+          headers: {
+            'Content-Type':
+              'application/json',
 
-  if (!response.ok) {
-    throw new ApiError(
-      data?.message || `Backend lỗi HTTP ${response.status}.`,
-      response.status,
-    );
-  }
-
-  return data;
-};
-
-export const normalizePhone = (value: string) =>
-  String(value || '').replace(/\D/g, '').slice(0, 10);
-
-export const registerAccount = async (payload: {
-  phone: string;
-  password: string;
-  role: UserRole;
-  adminCode?: string;
-  shipperCode?: string;
-}): Promise<AuthResponse> => {
-  return request('/auth/register', {
-    method: 'POST',
-    body: JSON.stringify({
-      phone: normalizePhone(payload.phone),
-      password: payload.password,
-      role: payload.role,
-      ...(payload.role === 'ADMIN'
-        ? { adminCode: payload.adminCode || '' }
-        : {}),
-      ...(payload.role === 'SHIPPER'
-        ? { shipperCode: payload.shipperCode || '' }
-        : {}),
-    }),
-  });
-};
-
-export const loginAccount = async (input: {
-  phone: string;
-  password: string;
-  role: UserRole;
-}) => {
-  const url = `${API_BASE_URL}/auth/login`;
-
-  console.log('==============================');
-  console.log('🌐 API_BASE_URL =', API_BASE_URL);
-  console.log('🔐 LOGIN URL =', url);
-  console.log('🔐 LOGIN INPUT =', {
-    phone: input.phone,
-    role: input.role,
-  });
-  console.log('==============================');
-
-  try {
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(input),
-    });
+            ...(options.headers || {}),
+          },
+        },
+      );
 
     console.log(
-      '🔐 LOGIN HTTP STATUS =',
+      '🌐 AUTH HTTP STATUS =',
       response.status,
     );
 
-    const data = await response.json();
+    const data =
+      await parseJsonSafe(
+        response,
+      );
 
+    // Không log toàn bộ response vì có thể chứa JWT token.
     console.log(
-      '🔐 LOGIN RESPONSE =',
-      data,
+      '🌐 AUTH RESPONSE OK =',
+      data?.ok,
     );
 
-    if (!response.ok || !data?.ok) {
-      throw new Error(
+    if (
+      !response.ok ||
+      data?.ok === false
+    ) {
+      throw new ApiError(
         data?.message ||
-          `Đăng nhập thất bại HTTP ${response.status}`,
+          `Backend lỗi HTTP ${response.status}.`,
+        response.status,
       );
     }
 
-    return {
-      user: data.user,
-      token: data.token,
-    };
-  } catch (error) {
-    console.log(
-      '❌ AUTH REAL ERROR =',
+    return data;
+  } catch (error: any) {
+    console.error(
+      '❌ AUTH REQUEST ERROR:',
       error,
     );
 
-    throw error;
+    if (
+      error?.name ===
+        'AbortError' ||
+      String(
+        error?.message || '',
+      )
+        .toLowerCase()
+        .includes('aborted')
+    ) {
+      throw new ApiError(
+        `Backend không phản hồi sau ${
+          REQUEST_TIMEOUT_MS /
+          1000
+        } giây. ` +
+          'Kiểm tra Railway / Internet rồi thử lại.',
+        0,
+      );
+    }
+
+    if (
+      error instanceof ApiError
+    ) {
+      throw error;
+    }
+
+    throw new ApiError(
+      'Không kết nối được SmartLocker Backend. Kiểm tra Railway và Internet.',
+      0,
+    );
+  } finally {
+    clearTimeout(
+      timeoutId,
+    );
   }
 };
 
-export const getCurrentUser = async (
-  token: string,
-): Promise<AuthUser> => {
-  const data = await request('/auth/me', {
-    method: 'GET',
-    headers: {
-      Authorization: `Bearer ${token}`,
-    },
-  });
+// ============================================================
+// PHONE
+// ============================================================
 
-  return data.user as AuthUser;
-};
+export const normalizePhone = (
+  value: string,
+) =>
+  String(
+    value || '',
+  )
+    .replace(/\D/g, '')
+    .slice(0, 10);
+
+// ============================================================
+// REGISTER
+// ============================================================
+
+export const registerAccount =
+  async (payload: {
+    phone: string;
+    password: string;
+    role: UserRole;
+
+    adminCode?: string;
+    shipperCode?: string;
+  }): Promise<AuthResponse> => {
+    return request(
+      '/auth/register',
+      {
+        method: 'POST',
+
+        body:
+          JSON.stringify({
+            phone:
+              normalizePhone(
+                payload.phone,
+              ),
+
+            password:
+              payload.password,
+
+            role:
+              payload.role,
+
+            ...(payload.role ===
+            'ADMIN'
+              ? {
+                  adminCode:
+                    payload.adminCode ||
+                    '',
+                }
+              : {}),
+
+            ...(payload.role ===
+            'SHIPPER'
+              ? {
+                  shipperCode:
+                    payload.shipperCode ||
+                    '',
+                }
+              : {}),
+          }),
+      },
+    ) as Promise<AuthResponse>;
+  };
+
+// ============================================================
+// LOGIN
+// ============================================================
+
+export const loginAccount =
+  async (input: {
+    phone: string;
+    password: string;
+    role: UserRole;
+  }): Promise<AuthResponse> => {
+    return request(
+      '/auth/login',
+      {
+        method: 'POST',
+
+        body:
+          JSON.stringify({
+            phone:
+              normalizePhone(
+                input.phone,
+              ),
+
+            password:
+              input.password,
+
+            role:
+              input.role,
+          }),
+      },
+    ) as Promise<AuthResponse>;
+  };
+
+// ============================================================
+// CURRENT USER
+// ============================================================
+
+export const getCurrentUser =
+  async (
+    token: string,
+  ): Promise<AuthUser> => {
+    const data =
+      await request(
+        '/auth/me',
+        {
+          method: 'GET',
+
+          headers: {
+            Authorization:
+              `Bearer ${token}`,
+          },
+        },
+      );
+
+    return data.user as AuthUser;
+  };

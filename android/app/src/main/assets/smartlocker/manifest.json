@@ -1,0 +1,41 @@
+{
+  "model1": {
+    "name": "PP-OCRv6 Small Text Detector",
+    "file": "model1_detector/model.onnx",
+    "input_name": "x",
+    "input_layout": "NCHW",
+    "input_shape": [
+      "N",
+      3,
+      "H",
+      "W"
+    ],
+    "output_name": "fetch_name_0"
+  },
+  "model2": {
+    "name": "PP-OCRv6 Small Text Recognizer",
+    "file": "model2_recognizer/model.onnx",
+    "dictionary": "model2_recognizer/ppocr_keys.txt",
+    "input_name": "x",
+    "input_layout": "NCHW",
+    "input_shape": [
+      "N",
+      3,
+      48,
+      "W"
+    ],
+    "output_name": "fetch_name_0",
+    "output_classes": 18710
+  },
+  "pipeline": [
+    "camera image",
+    "try rotation 0/90/180/270",
+    "model1 text detection",
+    "crop text boxes",
+    "model2 recognition",
+    "receiver-context scoring",
+    "normalize +84/84 to 0",
+    "return receiver phone"
+  ],
+  "runtime": "onnxruntime-react-native"
+}

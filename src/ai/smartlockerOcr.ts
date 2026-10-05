@@ -20,38 +20,110 @@ const REC_W = 320;
 // - OCR 4 text boxes per ONNX call instead of 1 call/box.
 // - Stop as soon as receiver phone is already confident.
 // - 0° is attempted first; 90/270/180 are fallbacks only.
-const REC_BATCH_SIZE = 4;
-const FAST_ACCEPT_SCORE = 120;
-const FAST_ACCEPT_CONF = 0.42;
+const REC_BATCH_SIZE = 2;
 
-const RECEIVER_KEYS = [
-  'to',
+type ConfidenceLevel = 'HIGH' | 'MEDIUM' | 'LOW';
+
+type SemanticRole =
+  | 'receiver'
+  | 'sender'
+  | null;
+
+const RECEIVER_TARGETS = [
+  'nguoi nhan',
+  'thong tin nguoi nhan',
   'receiver',
   'recipient',
   'consignee',
-  'nguoi nhan',
-  'den',
-  'thong tin nguoi nhan',
-  'giao den',
 ];
 
-const SENDER_KEYS = [
-  'from',
-  'sender',
+const SENDER_TARGETS = [
   'nguoi gui',
   'thong tin nguoi gui',
-  'shop',
+  'sender',
+  'ship from',
+  'from',
 ];
 
-const BAD_KEYS = [
+const RECEIVER_FORMS = new Set([
+  'nguoinhan',
+  'nguinhan',
+  'nguinhn',
+  'nguoinhn',
+  'thongtinnguoinhan',
+  'thongtinnguinhan',
+  'thongtinnguinhn',
+  'thngtinnguoinhan',
+  'thngtinnguinhan',
+  'thngtinnguinhn',
+]);
+
+const SENDER_FORMS = new Set([
+  'nguoigui',
+  'nguigui',
+  'nguigi',
+  'nguoigi',
+  'thongtinnguoigui',
+  'thongtinnguigui',
+  'thongtinnguigi',
+  'thngtinnguoigui',
+  'thngtinnguigui',
+  'thngtinnguigi',
+]);
+
+const GENERIC_NON_ROLE_FORMS = new Set([
+  'delivery',
+  'smartlockerdelivery',
+  'giaodentu',
+  'giaodentuantoan',
+  'giaodentuantoantienloimoiluc',
+]);
+
+const SHORT_RECEIVER_FORMS = new Set([
+  'den',
+  'dn',
+  'to',
+]);
+
+const SHORT_SENDER_FORMS = new Set([
+  'tu',
+]);
+
+const NEGATIVE_WORDS = [
   'hotline',
   'cskh',
   'tong dai',
   'tracking',
   'ma van don',
-  'order id',
+  'ma vn don',
+  'van don',
+  'ma don hang',
   'ma don',
+  'order id',
+  'parcel id',
+  'tracking number',
 ];
+
+const NEGATIVE_COMPACT_WORDS = [
+  'hotline',
+  'cskh',
+  'tongdai',
+  'tracking',
+  'mavandon',
+  'mavndon',
+  'vandon',
+  'madonhang',
+  'madon',
+  'orderid',
+  'parcelid',
+  'trackingnumber',
+];
+
+const CONF_BONUS: Record<ConfidenceLevel, number> = {
+  HIGH: 4,
+  MEDIUM: 2,
+  LOW: 0,
+};
 
 type RawImage = {
   width: number;
@@ -72,12 +144,42 @@ export type OcrLine = TextBox & {
   confidence: number;
 };
 
-export type ReceiverPhoneResult = {
-  phone: string | null;
+export type CandidateScore = {
+  phone: string;
   score: number;
+  text: string;
+  lineIndex: number;
+  receiverDistance: number | null;
+  senderDistance: number | null;
+  negativeDistance: number | null;
+  reasons: string[];
+};
+
+export type RotationPhoneResult = {
+  phone: string | null;
+  score: number | null;
+  margin: number | null;
+  confidence: ConfidenceLevel;
+  method: string;
   orientation: 0 | 90 | 180 | 270;
   lines: OcrLine[];
   selectedLine?: OcrLine;
+  receiverAnchors: string[];
+  senderAnchors: string[];
+  candidateScores: CandidateScore[];
+  debug: string;
+};
+
+export type ReceiverPhoneResult = {
+  phone: string | null;
+  score: number;
+  margin: number | null;
+  confidence: ConfidenceLevel;
+  method: string;
+  orientation: 0 | 90 | 180 | 270;
+  lines: OcrLine[];
+  selectedLine?: OcrLine;
+  rotations: RotationPhoneResult[];
   debug: string;
 };
 
@@ -97,22 +199,327 @@ const normalizeFilePath = (path: string) =>
 
 const normalizeText = (value: string) =>
   String(value || '')
+    .toLowerCase()
+    .replace(/đ/g, 'd')
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
-    .toLowerCase()
     .replace(/\s+/g, ' ')
     .trim();
 
-const normalizeVnPhone = (value: string): string | null => {
-  let digits = String(value || '').replace(/\D/g, '');
+const compactText = (value: string) =>
+  normalizeText(value).replace(/[^a-z0-9]/g, '');
+
+const levenshteinDistance = (
+  a: string,
+  b: string,
+) => {
+  const aa = compactText(a);
+  const bb = compactText(b);
+
+  if (aa === bb) {
+    return 0;
+  }
+
+  if (!aa.length) {
+    return bb.length;
+  }
+
+  if (!bb.length) {
+    return aa.length;
+  }
+
+  const prev = new Array(bb.length + 1);
+  const curr = new Array(bb.length + 1);
+
+  for (let j = 0; j <= bb.length; j++) {
+    prev[j] = j;
+  }
+
+  for (let i = 1; i <= aa.length; i++) {
+    curr[0] = i;
+
+    for (let j = 1; j <= bb.length; j++) {
+      const cost =
+        aa[i - 1] === bb[j - 1]
+          ? 0
+          : 1;
+
+      curr[j] = Math.min(
+        curr[j - 1] + 1,
+        prev[j] + 1,
+        prev[j - 1] + cost,
+      );
+    }
+
+    for (let j = 0; j <= bb.length; j++) {
+      prev[j] = curr[j];
+    }
+  }
+
+  return prev[bb.length];
+};
+
+const similarity = (
+  a: string,
+  b: string,
+) => {
+  const aa = compactText(a);
+  const bb = compactText(b);
+
+  if (!aa || !bb) {
+    return 0;
+  }
+
+  const maxLen = Math.max(
+    aa.length,
+    bb.length,
+  );
+
+  if (maxLen === 0) {
+    return 0;
+  }
+
+  return (
+    1 -
+    levenshteinDistance(
+      aa,
+      bb,
+    ) /
+      maxLen
+  );
+};
+
+const targetScore = (
+  text: string,
+  targets: string[],
+  noisyForms: Set<string>,
+) => {
+  const compact =
+    compactText(text);
+
+  if (!compact) {
+    return 0;
+  }
+
+  if (
+    noisyForms.has(
+      compact,
+    )
+  ) {
+    return 1;
+  }
+
+  let best = 0;
+
+  for (const target of targets) {
+    const t =
+      compactText(target);
+
+    if (!t) {
+      continue;
+    }
+
+    if (compact === t) {
+      best = Math.max(
+        best,
+        1,
+      );
+      continue;
+    }
+
+    if (
+      t.length >= 6 &&
+      compact.includes(t)
+    ) {
+      best = Math.max(
+        best,
+        0.96,
+      );
+    }
+
+    best = Math.max(
+      best,
+      similarity(
+        compact,
+        t,
+      ),
+    );
+  }
+
+  return best;
+};
+
+const semanticRole = (
+  text: string,
+): {
+  role: SemanticRole;
+  receiverScore: number;
+  senderScore: number;
+} => {
+  const compact =
+    compactText(text);
+
+  if (!compact) {
+    return {
+      role: null,
+      receiverScore: 0,
+      senderScore: 0,
+    };
+  }
+
+  if (
+    GENERIC_NON_ROLE_FORMS.has(
+      compact,
+    )
+  ) {
+    return {
+      role: null,
+      receiverScore: 0,
+      senderScore: 0,
+    };
+  }
+
+  if (
+    SHORT_RECEIVER_FORMS.has(
+      compact,
+    )
+  ) {
+    return {
+      role: 'receiver',
+      receiverScore: 1,
+      senderScore: 0,
+    };
+  }
+
+  if (
+    SHORT_SENDER_FORMS.has(
+      compact,
+    )
+  ) {
+    return {
+      role: 'sender',
+      receiverScore: 0,
+      senderScore: 1,
+    };
+  }
+
+  if (
+    compact.includes(
+      'giaodentu',
+    ) ||
+    compact === 'delivery' ||
+    compact.endsWith(
+      'delivery',
+    )
+  ) {
+    return {
+      role: null,
+      receiverScore: 0,
+      senderScore: 0,
+    };
+  }
+
+  const receiverScore =
+    targetScore(
+      text,
+      RECEIVER_TARGETS,
+      RECEIVER_FORMS,
+    );
+
+  const senderScore =
+    targetScore(
+      text,
+      SENDER_TARGETS,
+      SENDER_FORMS,
+    );
+
+  const threshold = 0.68;
+  const margin = 0.08;
+
+  if (
+    receiverScore >=
+      threshold &&
+    receiverScore -
+      senderScore >=
+      margin
+  ) {
+    return {
+      role: 'receiver',
+      receiverScore,
+      senderScore,
+    };
+  }
+
+  if (
+    senderScore >=
+      threshold &&
+    senderScore -
+      receiverScore >=
+      margin
+  ) {
+    return {
+      role: 'sender',
+      receiverScore,
+      senderScore,
+    };
+  }
+
+  return {
+    role: null,
+    receiverScore,
+    senderScore,
+  };
+};
+
+const isNegativeAnchorText = (
+  value: string,
+) => {
+  const normalized =
+    normalizeText(value);
+
+  const compact =
+    compactText(value);
+
+  if (
+    NEGATIVE_WORDS.some(
+      key =>
+        normalized.includes(
+          key,
+        ),
+    )
+  ) {
+    return true;
+  }
+
+  return (
+    NEGATIVE_COMPACT_WORDS.some(
+      key =>
+        compact.includes(
+          key,
+        ),
+    )
+  );
+};
+
+const normalizePhoneDigits = (
+  candidate: string,
+): string | null => {
+  let digits =
+    String(candidate || '').replace(/\D/g, '');
 
   // (+84)0xxxxxxxxx
-  if (digits.length === 12 && digits.startsWith('840')) {
+  if (
+    digits.length === 12 &&
+    digits.startsWith('840')
+  ) {
     digits = digits.slice(2);
   }
 
   // +84xxxxxxxxx / 84xxxxxxxxx
-  if (digits.length === 11 && digits.startsWith('84')) {
+  if (
+    digits.length === 11 &&
+    digits.startsWith('84')
+  ) {
     digits = `0${digits.slice(2)}`;
   }
 
@@ -122,6 +529,103 @@ const normalizeVnPhone = (value: string): string | null => {
 
   return null;
 };
+
+const extractVnPhones = (
+  value: string,
+): string[] => {
+  if (
+    isNegativeAnchorText(
+      value,
+    )
+  ) {
+    return [];
+  }
+
+  const source =
+    String(
+      value || '',
+    );
+
+  const phonePattern =
+    /(?:\+?84|0)[\s().-]*[35789](?:[\s().-]*\d){8}/g;
+
+  const phones: string[] = [];
+  let match:
+    | RegExpExecArray
+    | null;
+
+  while (
+    (
+      match =
+        phonePattern.exec(
+          source,
+        )
+    ) !== null
+  ) {
+    const start =
+      match.index;
+
+    const end =
+      start +
+      match[0].length;
+
+    const before =
+      start > 0
+        ? source[
+            start - 1
+          ]
+        : '';
+
+    const after =
+      end <
+      source.length
+        ? source[end]
+        : '';
+
+    if (
+      before &&
+      /[A-Za-z0-9]/.test(
+        before,
+      )
+    ) {
+      continue;
+    }
+
+    if (
+      after &&
+      /[A-Za-z0-9]/.test(
+        after,
+      )
+    ) {
+      continue;
+    }
+
+    const phone =
+      normalizePhoneDigits(
+        match[0],
+      );
+
+    if (
+      phone &&
+      !phones.includes(
+        phone,
+      )
+    ) {
+      phones.push(
+        phone,
+      );
+    }
+  }
+
+  return phones;
+};
+
+const normalizeVnPhone = (
+  value: string,
+): string | null =>
+  extractVnPhones(
+    value,
+  )[0] ?? null;
 
 const copyAssetFresh = async (
   assetPath: string,
@@ -777,108 +1281,844 @@ const recognizeBatch = async (
   return lines;
 };
 
-const chooseReceiver = (
+type ScoredLine = OcrLine & {
+  index: number;
+  cx: number;
+  cy: number;
+  role: SemanticRole;
+  isNegative: boolean;
+  phones: string[];
+};
+
+const lineCenter = (
+  line: TextBox,
+) => ({
+  x:
+    (line.x1 + line.x2) /
+    2,
+  y:
+    (line.y1 + line.y2) /
+    2,
+});
+
+const buildScoredLines = (
+  lines: OcrLine[],
+): ScoredLine[] =>
+  lines.map(
+    (
+      line,
+      index,
+    ) => {
+      const center =
+        lineCenter(line);
+
+      const semantic =
+        semanticRole(
+          line.text,
+        );
+
+      return {
+        ...line,
+        index,
+        cx: center.x,
+        cy: center.y,
+        role:
+          semantic.role,
+        isNegative:
+          isNegativeAnchorText(
+            line.text,
+          ),
+        phones:
+          extractVnPhones(
+            line.text,
+          ),
+      };
+    },
+  );
+
+const layoutSpan = (
+  lines: ScoredLine[],
+) => {
+  if (
+    lines.length === 0
+  ) {
+    return {
+      spanX: 1,
+      spanY: 1,
+    };
+  }
+
+  const xs =
+    lines.map(
+      l => l.cx,
+    );
+
+  const ys =
+    lines.map(
+      l => l.cy,
+    );
+
+  return {
+    spanX: Math.max(
+      Math.max(...xs) -
+        Math.min(...xs),
+      1,
+    ),
+    spanY: Math.max(
+      Math.max(...ys) -
+        Math.min(...ys),
+      1,
+    ),
+  };
+};
+
+const normalizedDistance = (
+  a: ScoredLine,
+  b: ScoredLine,
+  spanX: number,
+  spanY: number,
+) => {
+  const dx =
+    (a.cx - b.cx) /
+    spanX;
+
+  const dy =
+    (a.cy - b.cy) /
+    spanY;
+
+  return Math.sqrt(
+    dx * dx + dy * dy,
+  );
+};
+
+const proximityStrength = (
+  distance: number | null,
+  radius: number,
+) => {
+  if (
+    distance === null ||
+    distance >= radius
+  ) {
+    return 0;
+  }
+
+  return (
+    1 -
+    distance / radius
+  );
+};
+
+const nearestDistance = (
+  line: ScoredLine,
+  anchors: ScoredLine[],
+  spanX: number,
+  spanY: number,
+): number | null => {
+  if (
+    anchors.length === 0
+  ) {
+    return null;
+  }
+
+  let best =
+    Number.POSITIVE_INFINITY;
+
+  for (
+    const anchor of anchors
+  ) {
+    best = Math.min(
+      best,
+      normalizedDistance(
+        line,
+        anchor,
+        spanX,
+        spanY,
+      ),
+    );
+  }
+
+  return Number.isFinite(
+    best,
+  )
+    ? best
+    : null;
+};
+
+const nearestIndexGap = (
+  line: ScoredLine,
+  anchors: ScoredLine[],
+): number | null => {
+  if (
+    anchors.length === 0
+  ) {
+    return null;
+  }
+
+  let best =
+    Number.POSITIVE_INFINITY;
+
+  for (
+    const anchor of anchors
+  ) {
+    best = Math.min(
+      best,
+      Math.abs(
+        line.index -
+          anchor.index,
+      ),
+    );
+  }
+
+  return Number.isFinite(
+    best,
+  )
+    ? best
+    : null;
+};
+
+const scorePhoneCandidates = (
   lines: OcrLine[],
 ) => {
-  const receiverAnchors = lines.filter(line => {
-    const t = normalizeText(line.text);
-    return RECEIVER_KEYS.some(k => t.includes(k));
-  });
+  const scoredLines =
+    buildScoredLines(
+      lines,
+    );
 
-  const senderAnchors = lines.filter(line => {
-    const t = normalizeText(line.text);
-    return SENDER_KEYS.some(k => t.includes(k));
-  });
+  const receivers =
+    scoredLines.filter(
+      l =>
+        l.role ===
+        'receiver',
+    );
 
-  const badAnchors = lines.filter(line => {
-    const t = normalizeText(line.text);
-    return BAD_KEYS.some(k => t.includes(k));
-  });
+  const senders =
+    scoredLines.filter(
+      l =>
+        l.role ===
+        'sender',
+    );
 
-  const center = (b: TextBox) => ({
-    x: (b.x1 + b.x2) / 2,
-    y: (b.y1 + b.y2) / 2,
-  });
+  const negatives =
+    scoredLines.filter(
+      l =>
+        l.isNegative,
+    );
 
-  let best:
-    | {
-        phone: string;
-        score: number;
-        line: OcrLine;
-      }
-    | undefined;
+  const phoneLines =
+    scoredLines.filter(
+      l =>
+        l.phones.length >
+        0,
+    );
 
-  for (const line of lines) {
-    const phone = normalizeVnPhone(line.text);
+  const {
+    spanX,
+    spanY,
+  } = layoutSpan(
+    scoredLines,
+  );
 
-    if (!phone) {
-      continue;
-    }
+  const candidateMap =
+    new Map<
+      string,
+      CandidateScore
+    >();
 
-    const c = center(line);
-    const own = normalizeText(line.text);
-
-    let score =
-      100 +
-      line.confidence * 20 +
-      line.score * 15;
-
-    if (
-      own.includes('sdt') ||
-      own.includes('phone') ||
-      own.includes('tel') ||
-      own.includes('mobile')
+  for (
+    const line of phoneLines
+  ) {
+    for (
+      const phone of
+        line.phones
     ) {
-      score += 20;
-    }
+      const receiverDistance =
+        nearestDistance(
+          line,
+          receivers,
+          spanX,
+          spanY,
+        );
 
-    for (const anchor of receiverAnchors) {
-      const a = center(anchor);
-      const dx = Math.abs(c.x - a.x);
-      const dy = Math.abs(c.y - a.y);
+      const senderDistance =
+        nearestDistance(
+          line,
+          senders,
+          spanX,
+          spanY,
+        );
 
-      score += Math.max(
-        0,
-        85 - 0.18 * dy - 0.07 * dx,
-      );
+      const negativeDistance =
+        nearestDistance(
+          line,
+          negatives,
+          spanX,
+          spanY,
+        );
 
-      if (c.y >= a.y - 25) {
-        score += 15;
-      }
-    }
+      const receiverGap =
+        nearestIndexGap(
+          line,
+          receivers,
+        );
 
-    for (const anchor of senderAnchors) {
-      const a = center(anchor);
-      const dx = Math.abs(c.x - a.x);
-      const dy = Math.abs(c.y - a.y);
+      const senderGap =
+        nearestIndexGap(
+          line,
+          senders,
+        );
 
-      score -= Math.max(
-        0,
-        85 - 0.18 * dy - 0.07 * dx,
-      );
-    }
+      let score = 0;
+      const reasons: string[] =
+        [];
 
-    for (const anchor of badAnchors) {
-      const a = center(anchor);
+      const receiverStrength =
+        proximityStrength(
+          receiverDistance,
+          0.55,
+        );
 
       if (
-        Math.abs(c.y - a.y) < 100 &&
-        Math.abs(c.x - a.x) < 320
+        receiverStrength > 0
       ) {
-        score -= 130;
-      }
-    }
+        const delta =
+          12 *
+          receiverStrength;
 
-    if (!best || score > best.score) {
-      best = {
+        score += delta;
+
+        reasons.push(
+          `receiver_geo:+${delta.toFixed(2)}`,
+        );
+      }
+
+      const senderStrength =
+        proximityStrength(
+          senderDistance,
+          0.55,
+        );
+
+      if (
+        senderStrength > 0
+      ) {
+        const delta =
+          11 *
+          senderStrength;
+
+        score -= delta;
+
+        reasons.push(
+          `sender_geo:-${delta.toFixed(2)}`,
+        );
+      }
+
+      const negativeStrength =
+        proximityStrength(
+          negativeDistance,
+          0.32,
+        );
+
+      if (
+        negativeStrength >
+        0
+      ) {
+        const delta =
+          8 *
+          negativeStrength;
+
+        score -= delta;
+
+        reasons.push(
+          `negative_geo:-${delta.toFixed(2)}`,
+        );
+      }
+
+      if (
+        receiverGap !==
+          null &&
+        receiverGap <= 4
+      ) {
+        const delta =
+          (2.5 *
+            (5 -
+              receiverGap)) /
+          5;
+
+        score += delta;
+
+        reasons.push(
+          `receiver_order:+${delta.toFixed(2)}`,
+        );
+      }
+
+      if (
+        senderGap !== null &&
+        senderGap <= 4
+      ) {
+        const delta =
+          (2 *
+            (5 -
+              senderGap)) /
+          5;
+
+        score -= delta;
+
+        reasons.push(
+          `sender_order:-${delta.toFixed(2)}`,
+        );
+      }
+
+      if (
+        receivers.length ===
+          0 &&
+        senders.length >
+          0 &&
+        senderDistance !==
+          null
+      ) {
+        const delta =
+          Math.min(
+            3,
+            4 *
+              senderDistance,
+          );
+
+        score += delta;
+
+        reasons.push(
+          `away_from_sender:+${delta.toFixed(2)}`,
+        );
+      }
+
+      const compact =
+        compactText(
+          line.text,
+        );
+
+      if (
+        compact.includes(
+          'sdt',
+        ) ||
+        compact.includes(
+          'phone',
+        ) ||
+        compact.includes(
+          'tel',
+        ) ||
+        compact.includes(
+          'mobile',
+        )
+      ) {
+        score += 0.75;
+
+        reasons.push(
+          'phone_label:+0.75',
+        );
+      }
+
+      const row:
+        CandidateScore = {
         phone,
         score,
-        line,
+        text: line.text,
+        lineIndex:
+          line.index,
+        receiverDistance,
+        senderDistance,
+        negativeDistance,
+        reasons,
       };
+
+      const old =
+        candidateMap.get(
+          phone,
+        );
+
+      if (
+        !old ||
+        row.score >
+          old.score
+      ) {
+        candidateMap.set(
+          phone,
+          row,
+        );
+      }
     }
   }
 
-  return best;
+  const ranked =
+    Array.from(
+      candidateMap.values(),
+    ).sort(
+      (a, b) =>
+        b.score -
+        a.score,
+    );
+
+  return {
+    ranked,
+    receivers,
+    senders,
+  };
+};
+
+const extractReceiverForRotation = (
+  lines: OcrLine[],
+  orientation:
+    | 0
+    | 90
+    | 180
+    | 270,
+): RotationPhoneResult => {
+  const scored =
+    scorePhoneCandidates(
+      lines,
+    );
+
+  const receiverAnchors =
+    scored.receivers.map(
+      l => l.text,
+    );
+
+  const senderAnchors =
+    scored.senders.map(
+      l => l.text,
+    );
+
+  const ranked =
+    scored.ranked;
+
+  if (
+    ranked.length === 0
+  ) {
+    return {
+      phone: null,
+      score: null,
+      margin: null,
+      confidence: 'LOW',
+      method:
+        'NO_VALID_PHONE',
+      orientation,
+      lines,
+      receiverAnchors,
+      senderAnchors,
+      candidateScores: [],
+      debug:
+        `orientation=${orientation}°, no valid phone`,
+    };
+  }
+
+  if (
+    ranked.length === 1
+  ) {
+    const top =
+      ranked[0];
+
+    const selectedLine =
+      lines[
+        top.lineIndex
+      ];
+
+    const confidence:
+      ConfidenceLevel =
+        top.score >= 4
+          ? 'HIGH'
+          : 'MEDIUM';
+
+    return {
+      phone: top.phone,
+      score: top.score,
+      margin: null,
+      confidence,
+      method:
+        'SCORE_ONLY_ONE_PHONE_V4',
+      orientation,
+      lines,
+      selectedLine,
+      receiverAnchors,
+      senderAnchors,
+      candidateScores:
+        ranked,
+      debug:
+        `orientation=${orientation}°, selected=${top.phone}, score=${top.score.toFixed(2)}, single`,
+    };
+  }
+
+  const top = ranked[0];
+  const second =
+    ranked[1];
+
+  const margin =
+    top.score -
+    second.score;
+
+  if (
+    top.score < 1 ||
+    margin < 1.25
+  ) {
+    return {
+      phone: null,
+      score: top.score,
+      margin,
+      confidence: 'LOW',
+      method:
+        'SCORE_UNCERTAIN_V4',
+      orientation,
+      lines,
+      receiverAnchors,
+      senderAnchors,
+      candidateScores:
+        ranked,
+      debug:
+        `orientation=${orientation}°, uncertain, top=${top.phone}:${top.score.toFixed(2)}, margin=${margin.toFixed(2)}`,
+    };
+  }
+
+  const confidence:
+    ConfidenceLevel =
+      top.score >= 4 &&
+      margin >= 2
+        ? 'HIGH'
+        : 'MEDIUM';
+
+  return {
+    phone: top.phone,
+    score: top.score,
+    margin,
+    confidence,
+    method:
+      'CANDIDATE_SCORE_V4',
+    orientation,
+    lines,
+    selectedLine:
+      lines[
+        top.lineIndex
+      ],
+    receiverAnchors,
+    senderAnchors,
+    candidateScores:
+      ranked,
+    debug:
+      `orientation=${orientation}°, selected=${top.phone}, score=${top.score.toFixed(2)}, margin=${margin.toFixed(2)}`,
+  };
+};
+
+const chooseAcrossRotations = (
+  rotationResults:
+    RotationPhoneResult[],
+) => {
+  type Aggregate = {
+    candidateScoreSum: number;
+    voteBonus: number;
+    selectedCount: number;
+    highCount: number;
+    positiveCandidateCount: number;
+    finalScore: number;
+  };
+
+  const agg =
+    new Map<
+      string,
+      Aggregate
+    >();
+
+  const ensure = (
+    phone: string,
+  ) => {
+    let stat =
+      agg.get(phone);
+
+    if (!stat) {
+      stat = {
+        candidateScoreSum: 0,
+        voteBonus: 0,
+        selectedCount: 0,
+        highCount: 0,
+        positiveCandidateCount:
+          0,
+        finalScore: 0,
+      };
+
+      agg.set(
+        phone,
+        stat,
+      );
+    }
+
+    return stat;
+  };
+
+  for (
+    const result of
+      rotationResults
+  ) {
+    for (
+      const candidate of
+        result.candidateScores
+    ) {
+      const stat =
+        ensure(
+          candidate.phone,
+        );
+
+      const clipped =
+        Math.max(
+          -12,
+          Math.min(
+            12,
+            candidate.score,
+          ),
+        );
+
+      stat.candidateScoreSum +=
+        clipped;
+
+      if (
+        candidate.score > 0
+      ) {
+        stat.positiveCandidateCount +=
+          1;
+      }
+    }
+
+    if (
+      result.phone
+    ) {
+      const stat =
+        ensure(
+          result.phone,
+        );
+
+      stat.voteBonus +=
+        CONF_BONUS[
+          result.confidence
+        ];
+
+      stat.selectedCount +=
+        1;
+
+      if (
+        result.confidence ===
+        'HIGH'
+      ) {
+        stat.highCount +=
+          1;
+      }
+    }
+  }
+
+  const ranked =
+    Array.from(
+      agg.entries(),
+    ).map(
+      ([phone, stat]) => {
+        const consistencyBonus =
+          1.5 *
+          stat.positiveCandidateCount;
+
+        stat.finalScore =
+          stat.candidateScoreSum +
+          stat.voteBonus +
+          consistencyBonus;
+
+        return {
+          phone,
+          ...stat,
+        };
+      },
+    ).sort(
+      (a, b) =>
+        b.finalScore -
+          a.finalScore ||
+        b.selectedCount -
+          a.selectedCount ||
+        b.highCount -
+          a.highCount ||
+        b.positiveCandidateCount -
+          a.positiveCandidateCount,
+    );
+
+  if (
+    ranked.length === 0
+  ) {
+    return {
+      phone: null,
+      score: null,
+      margin: null,
+      confidence:
+        'LOW' as ConfidenceLevel,
+      method:
+        'ALL_ROTATIONS_NO_PHONE_V4',
+    };
+  }
+
+  const top =
+    ranked[0];
+
+  const secondScore =
+    ranked.length >= 2
+      ? ranked[1]
+          .finalScore
+      : null;
+
+  const margin =
+    secondScore === null
+      ? null
+      : top.finalScore -
+        secondScore;
+
+  if (
+    top.finalScore <= 0
+  ) {
+    return {
+      phone: null,
+      score:
+        top.finalScore,
+      margin,
+      confidence:
+        'LOW' as ConfidenceLevel,
+      method:
+        'ROTATION_SCORE_NONPOSITIVE_V4',
+    };
+  }
+
+  if (
+    secondScore !== null &&
+    margin !== null &&
+    margin < 2
+  ) {
+    return {
+      phone: null,
+      score:
+        top.finalScore,
+      margin,
+      confidence:
+        'LOW' as ConfidenceLevel,
+      method:
+        'ROTATION_SCORE_TIE_V4',
+    };
+  }
+
+  const confidence:
+    ConfidenceLevel =
+      top.finalScore >= 6 &&
+      (
+        top.highCount >= 1 ||
+        top.selectedCount >=
+          2
+      )
+        ? 'HIGH'
+        : 'MEDIUM';
+
+  return {
+    phone: top.phone,
+    score:
+      top.finalScore,
+    margin,
+    confidence,
+    method:
+      'ROTATION_SCORE_V4',
+  };
 };
 
 const runOrientation = async (
@@ -887,40 +2127,54 @@ const runOrientation = async (
   dictionary: string[],
   original: RawImage,
   orientation: 0 | 90 | 180 | 270,
-): Promise<ReceiverPhoneResult> => {
-  const orientationStart = Date.now();
-  const raw = rotateRaw(original, orientation);
+): Promise<RotationPhoneResult> => {
+  const orientationStart =
+    Date.now();
 
-  const detStart = Date.now();
+  const raw =
+    rotateRaw(
+      original,
+      orientation,
+    );
+
+  const detStart =
+    Date.now();
+
   const boxes =
-    await detectTextBoxes(detector, raw);
-  const detMs = Date.now() - detStart;
+    await detectTextBoxes(
+      detector,
+      raw,
+    );
 
-  const lines: OcrLine[] = [];
+  const detMs =
+    Date.now() -
+    detStart;
+
+  const lines: OcrLine[] =
+    [];
+
   let recMs = 0;
-  let selected:
-    | {
-        phone: string;
-        score: number;
-        line: OcrLine;
-      }
-    | undefined;
 
-  // OCR in small batches.
-  // Output has 18,710 classes, so batching every box at once would waste RAM.
+  // IMPORTANT V4:
+  // OCR theo batch và chấm V4 tăng dần.
+  // Chỉ early-stop khi đã có đủ receiver/sender evidence + >=2 phone candidates.
   for (
     let startIndex = 0;
-    startIndex < boxes.length;
-    startIndex += REC_BATCH_SIZE
+    startIndex <
+    boxes.length;
+    startIndex +=
+    REC_BATCH_SIZE
   ) {
     const batch =
       boxes.slice(
         startIndex,
-        startIndex + REC_BATCH_SIZE,
+        startIndex +
+          REC_BATCH_SIZE,
       );
 
     try {
-      const recStart = Date.now();
+      const recStart =
+        Date.now();
 
       const batchLines =
         await recognizeBatch(
@@ -930,37 +2184,70 @@ const runOrientation = async (
           dictionary,
         );
 
-      recMs += Date.now() - recStart;
+      recMs +=
+        Date.now() -
+        recStart;
 
-      for (const line of batchLines) {
+      for (
+        const line of
+          batchLines
+      ) {
         if (
-          line.text.trim().length > 0 &&
-          line.confidence >= 0.20
+          line.text
+            .trim()
+            .length >
+            0 &&
+          line.confidence >=
+            0.2
         ) {
-          lines.push(line);
+          lines.push(
+            line,
+          );
         }
       }
 
-      // Reading order is already preserved by detector boxes.
-      selected = chooseReceiver(lines);
+      // ==================================================
+      // FAST-SAFE INSIDE ONE ROTATION
+      // ==================================================
+      // V4 cũ phải OCR hết mọi box rồi mới chấm.
+      // Trên mobile điều này rất chậm vì một bill có thể 40-50 box.
+      //
+      // Sau mỗi batch, thử chấm tạm. Chỉ dừng khi:
+      // - đã thấy cả receiver + sender anchor
+      // - có ít nhất 2 phone candidates
+      // - top candidate HIGH
+      // - margin >= 2
+      //
+      // Như vậy không dừng chỉ vì gặp SĐT đầu tiên.
+      if (lines.length >= 6) {
+        const partial =
+          extractReceiverForRotation(
+            lines,
+            orientation,
+          );
 
-      // If receiver context + valid phone is already strong,
-      // do not OCR the remaining unrelated bill text.
-      if (
-        selected &&
-        selected.score >= FAST_ACCEPT_SCORE &&
-        selected.line.confidence >= FAST_ACCEPT_CONF
-      ) {
-        console.log(
-          `⚡ EARLY STOP ${orientation}°:`,
-          selected.phone,
-          `score=${selected.score.toFixed(1)}`,
-          `after ${Math.min(
-            startIndex + batch.length,
-            boxes.length,
-          )}/${boxes.length} boxes`,
-        );
-        break;
+        if (
+          partial.phone &&
+          partial.confidence === 'HIGH' &&
+          partial.receiverAnchors.length > 0 &&
+          partial.senderAnchors.length > 0 &&
+          partial.candidateScores.length >= 2 &&
+          partial.margin !== null &&
+          partial.margin >= 2 &&
+          partial.score !== null &&
+          partial.score >= 4
+        ) {
+          console.log(
+            `⚡ PARTIAL V4 ACCEPT ${orientation}°:`,
+            partial.phone,
+            `lines=${lines.length}`,
+            `candidates=${partial.candidateScores.length}`,
+            `score=${partial.score.toFixed(2)}`,
+            `margin=${partial.margin.toFixed(2)}`,
+          );
+
+          break;
+        }
       }
     } catch (error) {
       console.warn(
@@ -970,39 +2257,68 @@ const runOrientation = async (
     }
   }
 
-  lines.sort((a, b) => {
-    const ay = (a.y1 + a.y2) / 2;
-    const by = (b.y1 + b.y2) / 2;
+  lines.sort(
+    (a, b) => {
+      const ay =
+        (a.y1 + a.y2) /
+        2;
 
-    if (Math.abs(ay - by) > 14) {
-      return ay - by;
-    }
+      const by =
+        (b.y1 + b.y2) /
+        2;
 
-    return a.x1 - b.x1;
-  });
+      if (
+        Math.abs(
+          ay - by,
+        ) > 14
+      ) {
+        return ay - by;
+      }
 
-  selected = chooseReceiver(lines);
-
-  console.log(
-    `===== OCR ${orientation}° =====`,
+      return (
+        a.x1 - b.x1
+      );
+    },
   );
 
-  for (const line of lines) {
+  const result =
+    extractReceiverForRotation(
+      lines,
+      orientation,
+    );
+
+  const totalMs =
+    Date.now() -
+    orientationStart;
+
+  console.log(
+    `===== OCR V4 ${orientation}° =====`,
+  );
+
+  for (
+    const line of lines
+  ) {
     console.log(
       `[${line.confidence.toFixed(2)}]`,
       line.text,
     );
   }
 
-  const orientationScore =
-    selected?.score ??
-    lines.reduce(
-      (sum, l) => sum + l.confidence,
-      0,
-    );
-
-  const totalMs =
-    Date.now() - orientationStart;
+  console.log(
+    `🎯 ROTATION V4 ${orientation}°:`,
+    result.phone ??
+      'UNCERTAIN',
+    `score=${
+      result.score ===
+      null
+        ? 'null'
+        : result.score.toFixed(
+            2,
+          )
+    }`,
+    `confidence=${result.confidence}`,
+    `method=${result.method}`,
+  );
 
   console.log(
     `⏱️ OCR ${orientation}° timing:`,
@@ -1012,61 +2328,43 @@ const runOrientation = async (
   );
 
   return {
-    phone: selected?.phone ?? null,
-    score: orientationScore,
-    orientation,
-    lines,
-    selectedLine: selected?.line,
+    ...result,
     debug:
-      `orientation=${orientation}°, ` +
+      `${result.debug}, ` +
       `boxes=${boxes.length}, ` +
       `ocrLines=${lines.length}, ` +
-      `selected=${selected?.phone ?? 'none'}, ` +
-      `score=${orientationScore.toFixed(1)}, ` +
-      `det=${detMs}ms, rec=${recMs}ms, total=${totalMs}ms`,
+      `det=${detMs}ms, ` +
+      `rec=${recMs}ms, ` +
+      `total=${totalMs}ms`,
   };
 };
 
 const createFastSession = async (
   modelPath: string,
 ) => {
-  try {
-    console.log(
-      '⚡ Creating ONNX session with XNNPACK...',
-    );
+  console.log(
+    '🛡️ Creating ONNX session in SAFE CPU mode...',
+  );
 
-    return await InferenceSession.create(
-      modelPath,
-      {
-        executionProviders: [
-          'xnnpack',
-          'cpu',
-        ],
-        graphOptimizationLevel: 'all',
-        intraOpNumThreads: 1,
-        interOpNumThreads: 1,
-        executionMode: 'sequential',
-        enableCpuMemArena: true,
-        enableMemPattern: true,
-      },
-    );
-  } catch (error) {
-    console.warn(
-      '⚠️ XNNPACK init failed, fallback CPU:',
-      error,
-    );
+  return InferenceSession.create(
+    modelPath,
+    {
+      // Native crash was observed inside libonnxruntime during session.run.
+      // Use CPU only first; XNNPACK can be re-enabled later after stability is proven.
+      executionProviders: ['cpu'],
 
-    return InferenceSession.create(
-      modelPath,
-      {
-        executionProviders: ['cpu'],
-        graphOptimizationLevel: 'all',
-        executionMode: 'sequential',
-        enableCpuMemArena: true,
-        enableMemPattern: true,
-      },
-    );
-  }
+      graphOptimizationLevel: 'all',
+
+      // Keep memory predictable on Android / emulator.
+      intraOpNumThreads: 1,
+      interOpNumThreads: 1,
+      executionMode: 'sequential',
+
+      // Disable native memory caching/pattern optimization for dynamic OCR calls.
+      enableCpuMemArena: false,
+      enableMemPattern: false,
+    },
+  );
 };
 
 export const createSmartLockerOcr =
@@ -1141,13 +2439,20 @@ export const createSmartLockerOcr =
     const scanJpeg = async (
       path: string,
     ): Promise<ReceiverPhoneResult> => {
-      const totalStart = Date.now();
+      const totalStart =
+        Date.now();
 
-      const decodeStart = Date.now();
+      const decodeStart =
+        Date.now();
+
       const original =
-        await decodeJpeg(path);
+        await decodeJpeg(
+          path,
+        );
+
       const decodeMs =
-        Date.now() - decodeStart;
+        Date.now() -
+        decodeStart;
 
       console.log(
         '📷 OCR SOURCE:',
@@ -1155,16 +2460,26 @@ export const createSmartLockerOcr =
         `decode=${decodeMs}ms`,
       );
 
-      // Most camera photos already arrive upright.
-      // Only rotate if the fast 0° pass does not confidently identify receiver phone.
+      // V4 benchmark dùng đủ 4 rotations.
+      // Không accept 0° sớm, vì số đầu tiên có thể là sender.
       const orientations:
-        Array<0 | 90 | 270 | 180> =
-          [0, 90, 270, 180];
+        Array<
+          0 | 90 | 180 | 270
+        > = [
+          0,
+          90,
+          270,
+          180,
+        ];
 
-      const results: ReceiverPhoneResult[] =
-        [];
+      const rotations:
+        RotationPhoneResult[] =
+          [];
 
-      for (const degree of orientations) {
+      for (
+        const degree of
+          orientations
+      ) {
         try {
           const current =
             await runOrientation(
@@ -1175,36 +2490,74 @@ export const createSmartLockerOcr =
               degree,
             );
 
-          results.push(current);
+          rotations.push(
+            current,
+          );
 
-          // This is the key latency optimization:
-          // if 0° (or any fallback angle) already has a strong receiver phone,
-          // return immediately instead of re-running detector+OCR 3 more times.
+          // ==================================================
+          // MOBILE FAST-SAFE EXIT
+          // ==================================================
+          // Ảnh chụp từ camera thường đã đúng chiều.
+          // Nếu 0° có đầy đủ bằng chứng receiver + sender,
+          // candidate thắng rõ và confidence HIGH thì không
+          // cần chạy thêm 3 lần OCR nặng.
           if (
+            degree === 0 &&
             current.phone &&
-            current.score >= FAST_ACCEPT_SCORE &&
+            current.confidence === 'HIGH' &&
+            current.receiverAnchors.length > 0 &&
+            current.senderAnchors.length > 0 &&
+            current.score !== null &&
+            current.score >= 4 &&
             (
-              current.selectedLine?.confidence ??
-              0
-            ) >= FAST_ACCEPT_CONF
+              current.margin === null ||
+              current.margin >= 2
+            )
           ) {
-            const totalMs =
-              Date.now() - totalStart;
-
             console.log(
-              '⚡ FAST ACCEPT:',
+              '⚡ FAST-SAFE ACCEPT 0°:',
               current.phone,
-              `${degree}°`,
-              `total=${totalMs}ms`,
+              `score=${current.score.toFixed(2)}`,
+              `margin=${
+                current.margin === null
+                  ? 'single'
+                  : current.margin.toFixed(2)
+              }`,
             );
+            break;
+          }
 
-            return {
-              ...current,
-              debug:
-                `${current.debug}, ` +
-                `decode=${decodeMs}ms, ` +
-                `scanTotal=${totalMs}ms, FAST`,
-            };
+          // Nếu 0° chưa đủ chắc, chạy thêm 90°.
+          // Khi hai rotation độc lập cùng chọn một số và
+          // aggregate đã HIGH thì có thể dừng an toàn.
+          if (rotations.length >= 2) {
+            const partial =
+              chooseAcrossRotations(
+                rotations,
+              );
+
+            const agreeing =
+              partial.phone
+                ? rotations.filter(
+                    item =>
+                      item.phone ===
+                      partial.phone,
+                  ).length
+                : 0;
+
+            if (
+              partial.phone &&
+              partial.confidence === 'HIGH' &&
+              agreeing >= 2
+            ) {
+              console.log(
+                '⚡ FAST-SAFE AGREEMENT:',
+                partial.phone,
+                `agree=${agreeing}`,
+                `score=${partial.score.toFixed(2)}`,
+              );
+              break;
+            }
           }
         } catch (error) {
           console.warn(
@@ -1214,34 +2567,156 @@ export const createSmartLockerOcr =
         }
       }
 
-      if (results.length === 0) {
+      if (
+        rotations.length ===
+        0
+      ) {
         throw new Error(
           'Không orientation nào chạy OCR được.',
         );
       }
 
-      const withPhone =
-        results.filter(r => !!r.phone);
+      const final =
+        chooseAcrossRotations(
+          rotations,
+        );
 
-      const best =
-        (withPhone.length > 0
-          ? withPhone
-          : results
-        ).sort((a, b) => b.score - a.score)[0];
+      // Chọn rotation đại diện để giữ compatibility
+      // với UI cũ (orientation / lines / selectedLine).
+      let representative =
+        rotations[0];
+
+      if (
+        final.phone
+      ) {
+        const matching =
+          rotations.filter(
+            rotation =>
+              rotation.phone ===
+              final.phone,
+          );
+
+        if (
+          matching.length >
+          0
+        ) {
+          representative =
+            matching.sort(
+              (a, b) =>
+                (b.score ??
+                  Number.NEGATIVE_INFINITY) -
+                (a.score ??
+                  Number.NEGATIVE_INFINITY),
+            )[0];
+        } else {
+          // Trường hợp final phone thắng nhờ candidate evidence
+          // dù không được chọn riêng ở rotation nào.
+          let bestCandidateScore =
+            Number.NEGATIVE_INFINITY;
+
+          for (
+            const rotation of
+              rotations
+          ) {
+            const candidate =
+              rotation.candidateScores.find(
+                item =>
+                  item.phone ===
+                  final.phone,
+              );
+
+            if (
+              candidate &&
+              candidate.score >
+                bestCandidateScore
+            ) {
+              bestCandidateScore =
+                candidate.score;
+
+              representative =
+                rotation;
+            }
+          }
+        }
+      } else {
+        representative =
+          [...rotations].sort(
+            (a, b) =>
+              (b.score ??
+                Number.NEGATIVE_INFINITY) -
+              (a.score ??
+                Number.NEGATIVE_INFINITY),
+          )[0];
+      }
 
       const totalMs =
-        Date.now() - totalStart;
+        Date.now() -
+        totalStart;
+
+      const score =
+        final.score ?? 0;
 
       console.log(
-        '🎯 FINAL RECEIVER RESULT:',
-        best,
+        '🎯 FINAL RECEIVER V4:',
+        final.phone ??
+          'UNCERTAIN',
+        `confidence=${final.confidence}`,
+        `method=${final.method}`,
+        `score=${score.toFixed(2)}`,
+        `margin=${
+          final.margin ===
+          null
+            ? 'null'
+            : final.margin.toFixed(
+                2,
+              )
+        }`,
         `scanTotal=${totalMs}ms`,
       );
 
       return {
-        ...best,
+        phone:
+          final.phone,
+        score,
+        margin:
+          final.margin,
+        confidence:
+          final.confidence,
+        method:
+          final.method,
+        orientation:
+          representative.orientation,
+        lines:
+          representative.lines,
+        selectedLine:
+          final.phone
+            ? representative.lines.find(
+                line =>
+                  extractVnPhones(
+                    line.text,
+                  ).includes(
+                    final.phone!,
+                  ),
+              )
+            : undefined,
+        rotations,
         debug:
-          `${best.debug}, ` +
+          `V4 phone=${
+            final.phone ??
+            'UNCERTAIN'
+          }, ` +
+          `confidence=${final.confidence}, ` +
+          `method=${final.method}, ` +
+          `score=${score.toFixed(2)}, ` +
+          `margin=${
+            final.margin ===
+            null
+              ? 'null'
+              : final.margin.toFixed(
+                  2,
+                )
+          }, ` +
+          `representative=${representative.orientation}°, ` +
           `decode=${decodeMs}ms, ` +
           `scanTotal=${totalMs}ms`,
       };
