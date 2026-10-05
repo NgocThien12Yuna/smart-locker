@@ -694,6 +694,83 @@ export default function ResidentScreen({
       }
     };
 
+  const waitForHardwareCommand =
+    async (
+      commandId: number,
+      timeoutMs = 45000,
+    ) => {
+      if (!currentToken) {
+        throw new Error(
+          'Không có phiên đăng nhập.',
+        );
+      }
+
+      const startedAt =
+        Date.now();
+
+      while (
+        Date.now() -
+          startedAt <
+        timeoutMs
+      ) {
+        const response =
+          await fetch(
+            `${API_BASE_URL}/hardware/commands/${commandId}/status`,
+            {
+              headers: {
+                Authorization:
+                  `Bearer ${currentToken}`,
+              },
+            },
+          );
+
+        const data =
+          await response.json();
+
+        if (
+          !response.ok ||
+          !data?.ok
+        ) {
+          throw new Error(
+            data?.message ||
+              `HTTP ${response.status}`,
+          );
+        }
+
+        const status =
+          data.command
+            ?.status;
+
+        if (
+          status === 'DONE'
+        ) {
+          return data.command;
+        }
+
+        if (
+          status === 'FAILED'
+        ) {
+          throw new Error(
+            data.command
+              ?.errorMessage ||
+              'ESP32 báo mở tủ thất bại.',
+          );
+        }
+
+        await new Promise(
+          resolve =>
+            setTimeout(
+              resolve,
+              1000,
+            ),
+        );
+      }
+
+      throw new Error(
+        'ESP32 chưa phản hồi sau 45 giây. Kiểm tra Wi-Fi/nguồn của ESP32 rồi thử lại.',
+      );
+    };
+
   const handleOpenLocker =
     async (
       pkg: ResidentPackage,
@@ -766,15 +843,36 @@ export default function ResidentScreen({
           );
         }
 
+        // ESP32 MODE:
+        // giữ spinner cho tới khi ESP ACK DONE/FAILED.
+        if (
+          data.hardwareMode &&
+          data.commandId
+        ) {
+          await waitForHardwareCommand(
+            Number(
+              data.commandId,
+            ),
+          );
+
+          Alert.alert(
+            '🔓 Mở tủ thành công',
+            `ESP32 đã xác nhận thực thi lệnh mở tủ ${data.locker}.`,
+          );
+
+          await loadPackages(
+            true,
+          );
+
+          return;
+        }
+
+        // SOFTWARE MODE tương thích bản cũ.
         Alert.alert(
           '🔓 Mở tủ thành công',
           `${data.message}\n\n` +
             `Tủ: ${data.locker}\n` +
-            `Chế độ: ${
-              data.hardwareMode
-                ? 'PHẦN CỨNG'
-                : 'SOFTWARE MODE'
-            }`,
+            'Chế độ: SOFTWARE MODE',
         );
 
         await loadPackages(
@@ -784,14 +882,14 @@ export default function ResidentScreen({
         error: any
       ) {
         console.error(
-          '❌ REDEEM OTP ERROR:',
+          '❌ REDEEM / HARDWARE ERROR:',
           error,
         );
 
         Alert.alert(
           'Không mở được tủ',
           error?.message ||
-            'Không xác minh được OTP.',
+            'Không xác minh được OTP hoặc ESP32 chưa phản hồi.',
         );
       } finally {
         setOpeningPackageId(
