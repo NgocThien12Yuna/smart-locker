@@ -35,22 +35,24 @@ if (!JWT_SECRET) {
 }
 
 // ======================================================
-// LOCKER MASTER
+// LOCKER MASTER - MÔ HÌNH 4 TỦ
 // ======================================================
 //
-// Size package hiện từ Shipper vẫn là M.
-// Backend sẽ tự chọn tủ trống:
-// - ưu tiên đúng size;
-// - nếu hết đúng size thì dùng tủ lớn hơn;
-// - không bao giờ dùng tủ nhỏ hơn package.
+// Mô hình phần cứng hiện tại chỉ sử dụng 4 tủ/4 relay:
+// - A01 -> IN1
+// - A02 -> IN2
+// - B01 -> IN3
+// - B05 -> IN4
+//
+// Tất cả 4 tủ được mô phỏng cùng size M để Shipper có thể
+// lần lượt lấp đầy đủ 4 tủ trong quá trình demo.
+// C01 và C02 đã loại khỏi danh sách cấp tủ mới và Admin overview.
 
 const ALL_LOCKERS = [
   { id: 'A01', name: 'Tủ A01', size: 'M' },
   { id: 'A02', name: 'Tủ A02', size: 'M' },
-  { id: 'B01', name: 'Tủ B01', size: 'S' },
+  { id: 'B01', name: 'Tủ B01', size: 'M' },
   { id: 'B05', name: 'Tủ B05', size: 'M' },
-  { id: 'C01', name: 'Tủ C01', size: 'L' },
-  { id: 'C02', name: 'Tủ C02', size: 'L' },
 ];
 
 const SIZE_RANK = {
