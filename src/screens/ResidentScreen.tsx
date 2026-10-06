@@ -196,6 +196,18 @@ const OtpBoxes = ({
   );
 };
 
+// ==========================================================
+// MÔ HÌNH DEMO HIỆN TẠI: CHỈ 4 TỦ
+// ==========================================================
+// C01/C02 đã được loại khỏi mô hình phần cứng và giao diện.
+const ACTIVE_LOCKER_IDS =
+  new Set([
+    'A01',
+    'A02',
+    'B01',
+    'B05',
+  ]);
+
 export default function ResidentScreen({
   navigation,
   route,
@@ -331,12 +343,20 @@ export default function ResidentScreen({
             );
           }
 
-          setPackages(
+          const activePackages =
             Array.isArray(
               data.packages,
             )
-              ? data.packages
-              : [],
+              ? data.packages.filter(
+                  (pkg: ResidentPackage) =>
+                    ACTIVE_LOCKER_IDS.has(
+                      pkg.locker,
+                    ),
+                )
+              : [];
+
+          setPackages(
+            activePackages,
           );
         } catch (
           error: any

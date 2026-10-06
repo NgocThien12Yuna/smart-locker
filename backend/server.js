@@ -2451,10 +2451,28 @@ app.get(
           req.user.userId,
         );
 
+      // Chỉ trả về các tủ đang được sử dụng trong mô hình 4 tủ hiện tại.
+      // Các package cũ ở C01/C02 vẫn được giữ trong database/lịch sử,
+      // nhưng không còn xuất hiện trên màn hình Cư dân.
+      const activeLockerIds =
+        new Set(
+          ALL_LOCKERS.map(
+            locker => locker.id,
+          ),
+        );
+
+      const visibleRows =
+        rows.filter(
+          row =>
+            activeLockerIds.has(
+              row.locker,
+            ),
+        );
+
       return res.json({
         ok: true,
         packages:
-          rows.map(
+          visibleRows.map(
             mapPackageForResident,
           ),
       });
