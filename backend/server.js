@@ -738,66 +738,196 @@ const getActiveHardwareCommand =
       );
   };
 
+const getLatestDoneHardwareAction =
+  (
+    packagePublicId,
+    action,
+  ) => {
+    return db
+      .prepare(`
+        SELECT *
+        FROM hardware_commands
+        WHERE package_public_id = ?
+          AND action = ?
+          AND status = 'DONE'
+        ORDER BY id DESC
+        LIMIT 1
+      `)
+      .get(
+        packagePublicId,
+        action,
+      );
+  };
+
+// OPEN DONE nhưng chưa có CLOSE DONE phía sau
+// => relay của package đang được xem là ON.
+const getUnclosedOpenCommand =
+  packagePublicId => {
+    const latestOpen =
+      getLatestDoneHardwareAction(
+        packagePublicId,
+        'OPEN',
+      );
+
+    if (!latestOpen) {
+      return null;
+    }
+
+    const latestClose =
+      getLatestDoneHardwareAction(
+        packagePublicId,
+        'CLOSE',
+      );
+
+    if (
+      latestClose &&
+      Number(
+        latestClose.id,
+      ) >
+        Number(
+          latestOpen.id,
+        )
+    ) {
+      return null;
+    }
+
+    return latestOpen;
+  };
+
+const insertHardwareCommand = ({
+  packageRow,
+  action,
+  requestedBy,
+  requestedByUserId,
+}) => {
+  const result =
+    db.prepare(`
+      INSERT INTO hardware_commands (
+        package_public_id,
+        action,
+        locker,
+        requested_by,
+        requested_by_user_id,
+        status
+      )
+      VALUES (
+        ?, ?, ?, ?, ?, 'PENDING'
+      )
+    `).run(
+      packageRow.public_id,
+      action,
+      packageRow.locker,
+      requestedBy,
+      requestedByUserId ||
+        null,
+    );
+
+  return db
+    .prepare(`
+      SELECT *
+      FROM hardware_commands
+      WHERE id = ?
+    `)
+    .get(
+      Number(
+        result.lastInsertRowid,
+      ),
+    );
+};
+
 const queueOpenCommand = ({
   packageRow,
   requestedBy,
   requestedByUserId,
 }) => {
-  const existing =
+  const active =
     getActiveHardwareCommand(
       packageRow.public_id,
     );
 
-  if (existing) {
-    return existing;
+  if (active) {
+    return active;
+  }
+
+  // Nếu relay đã bật và chưa CLOSE,
+  // không tạo OPEN lần hai.
+  const alreadyOpen =
+    getUnclosedOpenCommand(
+      packageRow.public_id,
+    );
+
+  if (alreadyOpen) {
+    return alreadyOpen;
   }
 
   try {
-    const result =
-      db.prepare(`
-        INSERT INTO hardware_commands (
-          package_public_id,
-          action,
-          locker,
-          requested_by,
-          requested_by_user_id,
-          status
-        )
-        VALUES (
-          ?, 'OPEN', ?, ?, ?, 'PENDING'
-        )
-      `).run(
-        packageRow.public_id,
-        packageRow.locker,
-        requestedBy,
-        requestedByUserId ||
-          null,
-      );
-
-    return db
-      .prepare(`
-        SELECT *
-        FROM hardware_commands
-        WHERE id = ?
-      `)
-      .get(
-        Number(
-          result.lastInsertRowid,
-        ),
-      );
+    return insertHardwareCommand({
+      packageRow,
+      action: 'OPEN',
+      requestedBy,
+      requestedByUserId,
+    });
   } catch (error) {
     // Partial UNIQUE index chống double-tap/race.
-    const active =
+    const retryActive =
       getActiveHardwareCommand(
         packageRow.public_id,
       );
 
-    if (active) {
-      return active;
+    if (retryActive) {
+      return retryActive;
     }
 
     throw error;
   }
+};
+
+const queueCloseCommand = ({
+  packageRow,
+  openCommand,
+}) => {
+  // Nếu đã có CLOSE sau OPEN này thì dùng lại.
+  const existingClose =
+    db.prepare(`
+      SELECT *
+      FROM hardware_commands
+      WHERE package_public_id = ?
+        AND action = 'CLOSE'
+        AND id > ?
+        AND status IN (
+          'PENDING',
+          'CLAIMED',
+          'DONE'
+        )
+      ORDER BY id DESC
+      LIMIT 1
+    `).get(
+      packageRow.public_id,
+      openCommand.id,
+    );
+
+  if (existingClose) {
+    return existingClose;
+  }
+
+  const active =
+    getActiveHardwareCommand(
+      packageRow.public_id,
+    );
+
+  if (active) {
+    return active;
+  }
+
+  return insertHardwareCommand({
+    packageRow,
+    action: 'CLOSE',
+    requestedBy:
+      openCommand.requested_by,
+    requestedByUserId:
+      openCommand
+        .requested_by_user_id,
+  });
 };
 
 const mapHardwareCommand = row =>
@@ -934,12 +1064,41 @@ const claimNextHardwareCommand =
           SELECT *
           FROM hardware_commands
           WHERE id = ?
-        `).get(
+        `)
+        .get(
           row.id,
         );
     },
   );
 
+const markHardwareCommandDone = (
+  commandId,
+  deviceId,
+) => {
+  db.prepare(`
+    UPDATE hardware_commands
+    SET
+      status = 'DONE',
+      device_id =
+        COALESCE(
+          device_id,
+          ?
+        ),
+      completed_at =
+        CURRENT_TIMESTAMP,
+      error_message = NULL
+    WHERE id = ?
+  `).run(
+    deviceId,
+    commandId,
+  );
+};
+
+// OPEN success:
+//   command DONE, package vẫn READY, relay vẫn ON.
+//
+// CLOSE success:
+//   command DONE, package -> PICKED_UP.
 const finalizeHardwareCommand =
   db.transaction(
     ({
@@ -1014,7 +1173,7 @@ const finalizeHardwareCommand =
         `).run(
           deviceId,
           message ||
-            'ESP32 báo mở tủ thất bại.',
+            `ESP32 báo lệnh ${command.action} thất bại.`,
           command.id,
         );
 
@@ -1037,7 +1196,8 @@ const finalizeHardwareCommand =
           FROM packages
           WHERE public_id = ?
         `).get(
-          command.package_public_id,
+          command
+            .package_public_id,
         );
 
       if (!packageRow) {
@@ -1060,33 +1220,20 @@ const finalizeHardwareCommand =
         };
       }
 
-      // Nếu package đã được xử lý trước đó,
-      // ACK được xem là idempotent.
+      // OPEN chỉ xác nhận relay đã bật.
+      // Chưa hoàn tất package ở đây.
       if (
-        packageRow.status !==
-        'READY'
+        command.action ===
+        'OPEN'
       ) {
-        db.prepare(`
-          UPDATE hardware_commands
-          SET
-            status = 'DONE',
-            device_id =
-              COALESCE(
-                device_id,
-                ?
-              ),
-            completed_at =
-              CURRENT_TIMESTAMP,
-            error_message = NULL
-          WHERE id = ?
-        `).run(
-          deviceId,
+        markHardwareCommandDone(
           command.id,
+          deviceId,
         );
 
         return {
           kind:
-            'PACKAGE_ALREADY_FINAL',
+            'OPEN_DONE',
           command:
             db.prepare(`
               SELECT *
@@ -1099,87 +1246,91 @@ const finalizeHardwareCommand =
         };
       }
 
-      // Chỉ sau khi ESP32 ACK thành công mới đánh dấu PICKED_UP.
-      db.prepare(`
-        UPDATE packages
-        SET
-          status = 'PICKED_UP',
-          picked_up_at =
-            CURRENT_TIMESTAMP,
-
-          pickup_otp = NULL,
-          pickup_otp_hash = NULL,
-          pickup_otp_enc = NULL,
-          pickup_otp_iv = NULL,
-          pickup_otp_tag = NULL,
-          otp_expires_at = NULL
-
-        WHERE id = ?
-          AND status = 'READY'
-      `).run(
-        packageRow.id,
-      );
-
-      db.prepare(`
-        UPDATE hardware_commands
-        SET
-          status = 'DONE',
-          device_id =
-            COALESCE(
-              device_id,
-              ?
-            ),
-          completed_at =
-            CURRENT_TIMESTAMP,
-          error_message = NULL
-        WHERE id = ?
-      `).run(
-        deviceId,
-        command.id,
-      );
-
+      // CLOSE xác nhận relay đã tắt.
+      // Lúc này mới hoàn tất package.
       if (
-        command.requested_by ===
-        'ADMIN'
+        command.action ===
+        'CLOSE'
       ) {
-        addActivityLog({
-          eventKey:
-            `FORCE_OPEN:${packageRow.public_id}`,
-          action:
-            'MỞ KHẨN CẤP',
-          packageId:
-            packageRow.public_id,
-          phone:
-            packageRow.receiver_phone,
-          locker:
-            packageRow.locker,
-        });
-      } else {
-        addActivityLog({
-          eventKey:
-            `PACKAGE_PICKED_UP:${packageRow.public_id}`,
-          action:
-            'NHẬN HÀNG',
-          packageId:
-            packageRow.public_id,
-          phone:
-            packageRow.receiver_phone,
-          locker:
-            packageRow.locker,
-        });
+        if (
+          packageRow.status ===
+          'READY'
+        ) {
+          db.prepare(`
+            UPDATE packages
+            SET
+              status = 'PICKED_UP',
+              picked_up_at =
+                CURRENT_TIMESTAMP,
+
+              pickup_otp = NULL,
+              pickup_otp_hash = NULL,
+              pickup_otp_enc = NULL,
+              pickup_otp_iv = NULL,
+              pickup_otp_tag = NULL,
+              otp_expires_at = NULL
+
+            WHERE id = ?
+              AND status = 'READY'
+          `).run(
+            packageRow.id,
+          );
+
+          if (
+            command.requested_by ===
+            'ADMIN'
+          ) {
+            addActivityLog({
+              eventKey:
+                `FORCE_OPEN:${packageRow.public_id}`,
+              action:
+                'MỞ KHẨN CẤP',
+              packageId:
+                packageRow.public_id,
+              phone:
+                packageRow.receiver_phone,
+              locker:
+                packageRow.locker,
+            });
+          } else {
+            addActivityLog({
+              eventKey:
+                `PACKAGE_PICKED_UP:${packageRow.public_id}`,
+              action:
+                'NHẬN HÀNG',
+              packageId:
+                packageRow.public_id,
+              phone:
+                packageRow.receiver_phone,
+              locker:
+                packageRow.locker,
+            });
+          }
+        }
+
+        markHardwareCommandDone(
+          command.id,
+          deviceId,
+        );
+
+        return {
+          kind:
+            'CLOSE_DONE',
+          command:
+            db.prepare(`
+              SELECT *
+              FROM hardware_commands
+              WHERE id = ?
+            `).get(
+              command.id,
+            ),
+          packageRow,
+        };
       }
 
       return {
-        kind: 'DONE',
-        command:
-          db.prepare(`
-            SELECT *
-            FROM hardware_commands
-            WHERE id = ?
-          `).get(
-            command.id,
-          ),
-        packageRow,
+        kind:
+          'UNSUPPORTED_ACTION',
       };
     },
   );
@@ -2432,8 +2583,9 @@ app.post(
 //
 // ESP32 MODE:
 //   xác minh OTP -> queue OPEN command.
-//   package vẫn READY.
-//   chỉ khi ESP32 POST complete success -> PICKED_UP.
+//   ESP ACK OPEN -> relay bật và giữ ON, package vẫn READY.
+//   người dùng bấm OK -> queue CLOSE.
+//   ESP ACK CLOSE -> relay OFF và package mới PICKED_UP.
 
 app.post(
   '/packages/:packageId/redeem',
@@ -2782,6 +2934,171 @@ app.get(
 );
 
 // ======================================================
+// APP - TẮT RELAY SAU KHI NGƯỜI DÙNG BẤM OK
+// ======================================================
+//
+// POST /hardware/packages/:packageId/close
+//
+// RESIDENT:
+//   chỉ được CLOSE package của chính mình.
+//
+// ADMIN:
+//   có thể CLOSE package đã mở khẩn cấp.
+//
+// Backend chỉ tạo CLOSE khi đã có OPEN DONE chưa được CLOSE.
+// ======================================================
+
+app.post(
+  '/hardware/packages/:packageId/close',
+  authMiddleware,
+  (req, res) => {
+    try {
+      if (
+        !requireEspHardwareConfigured(
+          res,
+        )
+      ) {
+        return;
+      }
+
+      const packageId =
+        String(
+          req.params
+            .packageId ||
+            '',
+        ).trim();
+
+      if (!packageId) {
+        return res
+          .status(400)
+          .json({
+            ok: false,
+            message:
+              'Thiếu packageId.',
+          });
+      }
+
+      const packageRow =
+        db.prepare(`
+          SELECT *
+          FROM packages
+          WHERE public_id = ?
+        `).get(
+          packageId,
+        );
+
+      if (!packageRow) {
+        return res
+          .status(404)
+          .json({
+            ok: false,
+            message:
+              'Không tìm thấy kiện hàng.',
+          });
+      }
+
+      if (
+        req.user.role ===
+        'RESIDENT'
+      ) {
+        if (
+          Number(
+            packageRow
+              .receiver_user_id,
+          ) !==
+          Number(
+            req.user.userId,
+          )
+        ) {
+          return res
+            .status(403)
+            .json({
+              ok: false,
+              message:
+                'Bạn không có quyền tắt relay của kiện hàng này.',
+            });
+        }
+      } else if (
+        req.user.role !==
+        'ADMIN'
+      ) {
+        return res
+          .status(403)
+          .json({
+            ok: false,
+            message:
+              'Tài khoản không có quyền sử dụng chức năng này.',
+          });
+      }
+
+      const openCommand =
+        getUnclosedOpenCommand(
+          packageRow.public_id,
+        );
+
+      if (!openCommand) {
+        return res.json({
+          ok: true,
+          hardwareMode: true,
+          mode: 'ESP32',
+          alreadyOff: true,
+          packageId:
+            packageRow.public_id,
+          locker:
+            packageRow.locker,
+          commandId: null,
+          status:
+            'ALREADY_OFF',
+          message:
+            `Relay tủ ${packageRow.locker} đã ở trạng thái OFF.`,
+        });
+      }
+
+      const closeCommand =
+        queueCloseCommand({
+          packageRow,
+          openCommand,
+        });
+
+      console.log(
+        `📡 QUEUE CLOSE: command=${closeCommand.id} locker=${packageRow.locker} package=${packageRow.public_id}`,
+      );
+
+      return res.json({
+        ok: true,
+        hardwareMode: true,
+        mode: 'ESP32',
+        packageId:
+          packageRow.public_id,
+        locker:
+          packageRow.locker,
+        commandId:
+          closeCommand.id,
+        commandStatus:
+          closeCommand.status,
+        status:
+          'WAITING_CLOSE',
+        message:
+          `Đã gửi lệnh tắt relay tủ ${packageRow.locker} tới ESP32.`,
+      });
+    } catch (error) {
+      console.error(
+        'QUEUE CLOSE ERROR:',
+        error,
+      );
+
+      return res
+        .status(500)
+        .json({
+          ok: false,
+          message:
+            'Lỗi server khi gửi lệnh tắt relay.',
+        });
+    }
+  },
+);
+
+// ======================================================
 // ESP32 - PING
 // ======================================================
 
@@ -2951,8 +3268,14 @@ app.post(
           ),
         message:
           success
-            ? 'Đã ACK mở tủ thành công.'
-            : 'Đã ghi nhận lỗi mở tủ.',
+            ? latest?.action ===
+              'CLOSE'
+              ? 'Đã ACK tắt relay thành công.'
+              : 'Đã ACK bật relay thành công.'
+            : `Đã ghi nhận lỗi lệnh ${
+                latest?.action ||
+                'hardware'
+              }.`,
       });
     } catch (error) {
       console.error(
@@ -3175,7 +3498,9 @@ app.get(
 // ======================================================
 //
 // SOFTWARE MODE: hoàn tất ngay.
-// ESP32 MODE: queue OPEN command và chờ ESP32 ACK.
+// ESP32 MODE: queue OPEN -> relay giữ ON.
+// Sau khi Admin bấm OK, app queue CLOSE.
+// Chỉ ACK CLOSE mới hoàn tất package.
 
 app.post(
   '/admin/packages/:packageId/force-open',

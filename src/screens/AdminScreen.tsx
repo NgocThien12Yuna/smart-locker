@@ -283,7 +283,7 @@ export default function AdminScreen({
           throw new Error(
             data.command
               ?.errorMessage ||
-              'ESP32 báo mở tủ thất bại.',
+              'ESP32 báo thực thi lệnh phần cứng thất bại.',
           );
         }
 
@@ -299,6 +299,106 @@ export default function AdminScreen({
       throw new Error(
         'ESP32 chưa phản hồi sau 45 giây.',
       );
+    };
+
+  // ==========================================================
+  // ADMIN TẮT RELAY SAU KHI BẤM OK
+  // ==========================================================
+
+  const requestAdminRelayOff =
+    async (
+      packageId: string,
+      lockerName: string,
+    ) => {
+      if (!currentToken) {
+        Alert.alert(
+          'Phiên Admin không hợp lệ',
+          'Không thể gửi lệnh tắt relay khi chưa đăng nhập.',
+        );
+        return;
+      }
+
+      try {
+        const response =
+          await fetch(
+            `${API_BASE_URL}/hardware/packages/${encodeURIComponent(
+              packageId,
+            )}/close`,
+            {
+              method:
+                'POST',
+              headers: {
+                Authorization:
+                  `Bearer ${currentToken}`,
+                'Content-Type':
+                  'application/json',
+              },
+            },
+          );
+
+        let data: any =
+          null;
+
+        try {
+          data =
+            await response.json();
+        } catch {
+          // ignore
+        }
+
+        if (
+          !response.ok ||
+          !data?.ok
+        ) {
+          throw new Error(
+            data?.message ||
+              `HTTP ${response.status}`,
+          );
+        }
+
+        if (
+          data.commandId
+        ) {
+          await waitForHardwareCommand(
+            Number(
+              data.commandId,
+            ),
+          );
+        }
+
+        await loadOverview(
+          true,
+        );
+
+        Alert.alert(
+          '✅ Đã hoàn tất',
+          `Relay ${lockerName} đã TẮT.`,
+        );
+      } catch (
+        error: any
+      ) {
+        Alert.alert(
+          '⚠️ Relay chưa tắt',
+          error?.message ||
+            `Không tắt được relay ${lockerName}.`,
+          [
+            {
+              text:
+                'THỬ LẠI',
+              onPress: () => {
+                requestAdminRelayOff(
+                  packageId,
+                  lockerName,
+                );
+              },
+            },
+          ],
+          {
+            cancelable:
+              false,
+          },
+        );
+      }
     };
 
   const forceOpen =
@@ -356,8 +456,15 @@ export default function AdminScreen({
                     },
                   );
 
-                const data =
-                  await response.json();
+                let data: any =
+                  null;
+
+                try {
+                  data =
+                    await response.json();
+                } catch {
+                  // ignore
+                }
 
                 if (
                   !response.ok ||
@@ -373,22 +480,46 @@ export default function AdminScreen({
                   data.hardwareMode &&
                   data.commandId
                 ) {
+                  // Chờ ESP bật relay.
                   await waitForHardwareCommand(
                     Number(
                       data.commandId,
                     ),
                   );
 
+                  // Relay vẫn ON cho đến khi Admin bấm OK.
                   Alert.alert(
-                    'Đã mở khẩn cấp',
-                    `ESP32 đã xác nhận mở ${locker.name}.`,
+                    '🔓 ĐÃ MỞ KHẨN CẤP',
+                    `ESP32 đã mở ${locker.name}.\n\n` +
+                      'Relay hiện đang BẬT.\n' +
+                      'Bấm OK khi hoàn tất để tắt relay.',
+                    [
+                      {
+                        text:
+                          'OK - TẮT RELAY',
+                        onPress:
+                          () => {
+                            requestAdminRelayOff(
+                              pkg.id,
+                              locker.name,
+                            );
+                          },
+                      },
+                    ],
+                    {
+                      cancelable:
+                        false,
+                    },
                   );
-                } else {
-                  Alert.alert(
-                    'Đã mở khẩn cấp',
-                    `${data.message}\n\nChế độ: SOFTWARE MODE`,
-                  );
+
+                  return;
                 }
+
+                // SOFTWARE MODE.
+                Alert.alert(
+                  'Đã mở khẩn cấp',
+                  `${data.message}\n\nChế độ: SOFTWARE MODE`,
+                );
 
                 await loadOverview(
                   true,

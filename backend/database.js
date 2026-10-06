@@ -306,21 +306,138 @@ db.exec(`
 // HARDWARE COMMANDS - ESP32
 // ======================================================
 //
-// App/Backend không gọi ESP32 trực tiếp.
-// Backend tạo lệnh PENDING trong bảng này.
-// ESP32 poll Railway -> CLAIMED -> thực thi relay -> ACK DONE/FAILED.
+// Luồng mới:
+// OPEN  -> ESP32 bật relay và GIỮ ON.
+// CLOSE -> ESP32 tắt relay khi người dùng bấm OK.
 //
-// package vẫn READY cho tới khi ESP32 ACK thành công.
-// Như vậy nếu ESP32 mất Wi-Fi / relay lỗi thì hệ thống KHÔNG đánh dấu
-// kiện hàng đã nhận nhầm.
+// package vẫn READY sau OPEN.
+// Chỉ sau khi CLOSE được ESP32 ACK thành công mới chuyển PICKED_UP.
+//
+// Có migration tự động từ schema cũ chỉ cho OPEN
+// sang schema mới hỗ trợ OPEN + CLOSE.
+
+const hardwareCommandsTable = db
+  .prepare(`
+    SELECT sql
+    FROM sqlite_master
+    WHERE type = 'table'
+      AND name = 'hardware_commands'
+  `)
+  .get();
+
+const hardwareCommandsNeedCloseMigration =
+  hardwareCommandsTable?.sql &&
+  !/\bCLOSE\b/i.test(
+    hardwareCommandsTable.sql,
+  );
+
+if (
+  hardwareCommandsNeedCloseMigration
+) {
+  console.log(
+    '♻️ Migrating hardware_commands: OPEN -> OPEN/CLOSE...',
+  );
+
+  db.pragma(
+    'foreign_keys = OFF',
+  );
+
+  try {
+    const migrateHardwareCommands =
+      db.transaction(() => {
+        db.exec(`
+          ALTER TABLE hardware_commands
+          RENAME TO hardware_commands_old;
+        `);
+
+        db.exec(`
+          CREATE TABLE hardware_commands (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+            package_public_id TEXT NOT NULL,
+
+            action TEXT NOT NULL DEFAULT 'OPEN'
+              CHECK(action IN ('OPEN', 'CLOSE')),
+
+            locker TEXT NOT NULL,
+
+            requested_by TEXT NOT NULL
+              CHECK(requested_by IN ('RESIDENT', 'ADMIN')),
+
+            requested_by_user_id INTEGER,
+
+            status TEXT NOT NULL DEFAULT 'PENDING'
+              CHECK(status IN ('PENDING', 'CLAIMED', 'DONE', 'FAILED')),
+
+            device_id TEXT,
+            attempts INTEGER NOT NULL DEFAULT 0,
+
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            claimed_at TEXT,
+            completed_at TEXT,
+
+            error_message TEXT
+          );
+        `);
+
+        db.exec(`
+          INSERT INTO hardware_commands (
+            id,
+            package_public_id,
+            action,
+            locker,
+            requested_by,
+            requested_by_user_id,
+            status,
+            device_id,
+            attempts,
+            created_at,
+            claimed_at,
+            completed_at,
+            error_message
+          )
+          SELECT
+            id,
+            package_public_id,
+            action,
+            locker,
+            requested_by,
+            requested_by_user_id,
+            status,
+            device_id,
+            attempts,
+            created_at,
+            claimed_at,
+            completed_at,
+            error_message
+          FROM hardware_commands_old;
+        `);
+
+        db.exec(`
+          DROP TABLE hardware_commands_old;
+        `);
+      });
+
+    migrateHardwareCommands();
+
+    console.log(
+      '✅ hardware_commands migration complete: OPEN + CLOSE.',
+    );
+  } finally {
+    db.pragma(
+      'foreign_keys = ON',
+    );
+  }
+}
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS hardware_commands (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
 
     package_public_id TEXT NOT NULL,
+
     action TEXT NOT NULL DEFAULT 'OPEN'
-      CHECK(action IN ('OPEN')),
+      CHECK(action IN ('OPEN', 'CLOSE')),
 
     locker TEXT NOT NULL,
 
