@@ -1,26 +1,4 @@
-import { InferenceSession, Tensor } from 'onnxruntime-react-native';
-import RNFS from 'react-native-fs';
-import * as jpeg from 'jpeg-js';
-import { Buffer } from 'buffer';
-
-if (!(globalThis as any).Buffer) {
-  (globalThis as any).Buffer = Buffer;
-}
-
-const DET_MAX_SIDE = 736;
-const DET_PIXEL_THRESH = 0.20;
-const DET_BOX_THRESH = 0.45;
-const DET_UNCLIP = 1.40;
-const DET_MAX_BOXES = 80;
-
-const REC_H = 48;
-const REC_W = 320;
-
-// SPEED PROFILE
-// - OCR 4 text boxes per ONNX call instead of 1 call/box.
-// - Stop as soon as receiver phone is already confident.
-// - 0° is attempted first; 90/270/180 are fallbacks only.
-const REC_BATCH_SIZE = 2;
+import { NativeModules } from 'react-native';
 
 type ConfidenceLevel = 'HIGH' | 'MEDIUM' | 'LOW';
 
@@ -125,11 +103,7 @@ const CONF_BONUS: Record<ConfidenceLevel, number> = {
   LOW: 0,
 };
 
-type RawImage = {
-  width: number;
-  height: number;
-  data: Uint8Array;
-};
+
 
 export type TextBox = {
   x1: number;
@@ -168,6 +142,7 @@ export type RotationPhoneResult = {
   senderAnchors: string[];
   candidateScores: CandidateScore[];
   debug: string;
+  nativeProfile?: string;
 };
 
 export type ReceiverPhoneResult = {
@@ -184,18 +159,30 @@ export type ReceiverPhoneResult = {
 };
 
 export type SmartLockerOcrEngine = {
-  detector: InferenceSession;
-  recognizer: InferenceSession;
-  dictionary: string[];
   dispose: () => Promise<void>;
   scanJpeg: (path: string) => Promise<ReceiverPhoneResult>;
 };
 
-const clamp = (v: number, lo: number, hi: number) =>
-  Math.max(lo, Math.min(hi, v));
+type NativeOrientationResult = {
+  lines: OcrLine[];
+  profile?: {
+    sourceWidth?: number;
+    sourceHeight?: number;
+    boxes?: number;
+    decodeMs?: number;
+    rotateMs?: number;
+    detPrepMs?: number;
+    detOnnxMs?: number;
+    detPostMs?: number;
+    recPrepMs?: number;
+    recOnnxMs?: number;
+    ctcMs?: number;
+    totalMs?: number;
+    recBatches?: number;
+  };
+};
 
-const normalizeFilePath = (path: string) =>
-  path.startsWith('file://') ? path.slice(7) : path;
+const NativeOcr = NativeModules.SmartLockerOcrNative;
 
 const normalizeText = (value: string) =>
   String(value || '')
@@ -627,659 +614,7 @@ const normalizeVnPhone = (
     value,
   )[0] ?? null;
 
-const copyAssetFresh = async (
-  assetPath: string,
-  outputName: string,
-) => {
-  const output =
-    `${RNFS.CachesDirectoryPath}/${outputName}`;
 
-  if (await RNFS.exists(output)) {
-    await RNFS.unlink(output);
-  }
-
-  await RNFS.copyFileAssets(assetPath, output);
-
-  const stat = await RNFS.stat(output);
-
-  console.log(
-    '📦 AI ASSET:',
-    assetPath,
-    '->',
-    output,
-    `${stat.size} bytes`,
-  );
-
-  return output;
-};
-
-const decodeJpeg = async (path: string): Promise<RawImage> => {
-  const base64 = await RNFS.readFile(
-    normalizeFilePath(path),
-    'base64',
-  );
-
-  const bytes = Buffer.from(base64, 'base64');
-
-  const decode: any =
-    (jpeg as any).decode ||
-    (jpeg as any).default?.decode ||
-    jpeg;
-
-  const raw = decode(bytes, {
-    useTArray: true,
-    formatAsRGBA: true,
-  });
-
-  if (!raw?.width || !raw?.height || !raw?.data) {
-    throw new Error('Không decode được ảnh JPEG.');
-  }
-
-  return {
-    width: raw.width,
-    height: raw.height,
-    data: raw.data as Uint8Array,
-  };
-};
-
-const rotateRaw = (
-  src: RawImage,
-  degree: 0 | 90 | 180 | 270,
-): RawImage => {
-  if (degree === 0) {
-    return src;
-  }
-
-  const sw = src.width;
-  const sh = src.height;
-
-  const dw =
-    degree === 90 || degree === 270 ? sh : sw;
-
-  const dh =
-    degree === 90 || degree === 270 ? sw : sh;
-
-  const out = new Uint8Array(dw * dh * 4);
-
-  for (let sy = 0; sy < sh; sy++) {
-    for (let sx = 0; sx < sw; sx++) {
-      let dx = 0;
-      let dy = 0;
-
-      if (degree === 90) {
-        dx = sh - 1 - sy;
-        dy = sx;
-      } else if (degree === 180) {
-        dx = sw - 1 - sx;
-        dy = sh - 1 - sy;
-      } else {
-        dx = sy;
-        dy = sw - 1 - sx;
-      }
-
-      const si = (sy * sw + sx) * 4;
-      const di = (dy * dw + dx) * 4;
-
-      out[di] = src.data[si];
-      out[di + 1] = src.data[si + 1];
-      out[di + 2] = src.data[si + 2];
-      out[di + 3] = 255;
-    }
-  }
-
-  return {
-    width: dw,
-    height: dh,
-    data: out,
-  };
-};
-
-const sampleRgbBilinear = (
-  raw: RawImage,
-  x: number,
-  y: number,
-) => {
-  const xx = clamp(x, 0, raw.width - 1);
-  const yy = clamp(y, 0, raw.height - 1);
-
-  const x0 = Math.floor(xx);
-  const y0 = Math.floor(yy);
-  const x1 = Math.min(raw.width - 1, x0 + 1);
-  const y1 = Math.min(raw.height - 1, y0 + 1);
-
-  const tx = xx - x0;
-  const ty = yy - y0;
-
-  const read = (px: number, py: number, channel: number) =>
-    raw.data[(py * raw.width + px) * 4 + channel];
-
-  const interp = (channel: number) => {
-    const v00 = read(x0, y0, channel);
-    const v10 = read(x1, y0, channel);
-    const v01 = read(x0, y1, channel);
-    const v11 = read(x1, y1, channel);
-
-    const top = v00 * (1 - tx) + v10 * tx;
-    const bottom = v01 * (1 - tx) + v11 * tx;
-
-    return top * (1 - ty) + bottom * ty;
-  };
-
-  return [interp(0), interp(1), interp(2)] as const;
-};
-
-const round32 = (n: number) =>
-  Math.max(32, Math.round(n / 32) * 32);
-
-const buildDetectorInput = (raw: RawImage) => {
-  const scale = Math.min(
-    1,
-    DET_MAX_SIDE / Math.max(raw.width, raw.height),
-  );
-
-  const targetW = round32(raw.width * scale);
-  const targetH = round32(raw.height * scale);
-
-  const input =
-    new Float32Array(3 * targetH * targetW);
-
-  const mean = [0.485, 0.456, 0.406];
-  const std = [0.229, 0.224, 0.225];
-
-  const plane = targetH * targetW;
-
-  for (let y = 0; y < targetH; y++) {
-    const sy =
-      ((y + 0.5) * raw.height) / targetH - 0.5;
-
-    for (let x = 0; x < targetW; x++) {
-      const sx =
-        ((x + 0.5) * raw.width) / targetW - 0.5;
-
-      const [r, g, b] =
-        sampleRgbBilinear(raw, sx, sy);
-
-      // Paddle config decodes BGR, then normalizes HWC.
-      const bgr = [b / 255, g / 255, r / 255];
-      const pos = y * targetW + x;
-
-      input[pos] =
-        (bgr[0] - mean[0]) / std[0];
-
-      input[plane + pos] =
-        (bgr[1] - mean[1]) / std[1];
-
-      input[plane * 2 + pos] =
-        (bgr[2] - mean[2]) / std[2];
-    }
-  }
-
-  return {
-    input,
-    targetW,
-    targetH,
-  };
-};
-
-const connectedBoxesFromDbMap = (
-  probs: Float32Array,
-  mapH: number,
-  mapW: number,
-  rawW: number,
-  rawH: number,
-): TextBox[] => {
-  const total = mapH * mapW;
-  const visited = new Uint8Array(total);
-  const queue = new Int32Array(total);
-
-  const components: TextBox[] = [];
-  const minPixels = Math.max(
-    6,
-    Math.floor(total * 0.000015),
-  );
-
-  const pushNeighbor = (
-    nx: number,
-    ny: number,
-    tailRef: { value: number },
-  ) => {
-    if (
-      nx < 0 ||
-      ny < 0 ||
-      nx >= mapW ||
-      ny >= mapH
-    ) {
-      return;
-    }
-
-    const ni = ny * mapW + nx;
-
-    if (
-      visited[ni] ||
-      probs[ni] < DET_PIXEL_THRESH
-    ) {
-      return;
-    }
-
-    visited[ni] = 1;
-    queue[tailRef.value++] = ni;
-  };
-
-  for (let start = 0; start < total; start++) {
-    if (
-      visited[start] ||
-      probs[start] < DET_PIXEL_THRESH
-    ) {
-      continue;
-    }
-
-    visited[start] = 1;
-
-    let head = 0;
-    const tail = { value: 1 };
-    queue[0] = start;
-
-    let minX = mapW;
-    let minY = mapH;
-    let maxX = 0;
-    let maxY = 0;
-    let count = 0;
-    let scoreSum = 0;
-
-    while (head < tail.value) {
-      const index = queue[head++];
-      const y = Math.floor(index / mapW);
-      const x = index - y * mapW;
-
-      minX = Math.min(minX, x);
-      minY = Math.min(minY, y);
-      maxX = Math.max(maxX, x);
-      maxY = Math.max(maxY, y);
-
-      count++;
-      scoreSum += probs[index];
-
-      pushNeighbor(x - 1, y, tail);
-      pushNeighbor(x + 1, y, tail);
-      pushNeighbor(x, y - 1, tail);
-      pushNeighbor(x, y + 1, tail);
-
-      // DB maps often connect diagonally.
-      pushNeighbor(x - 1, y - 1, tail);
-      pushNeighbor(x + 1, y - 1, tail);
-      pushNeighbor(x - 1, y + 1, tail);
-      pushNeighbor(x + 1, y + 1, tail);
-    }
-
-    if (count < minPixels) {
-      continue;
-    }
-
-    const score = scoreSum / Math.max(1, count);
-
-    if (score < DET_BOX_THRESH) {
-      continue;
-    }
-
-    let x1 = (minX / mapW) * rawW;
-    let y1 = (minY / mapH) * rawH;
-    let x2 = ((maxX + 1) / mapW) * rawW;
-    let y2 = ((maxY + 1) / mapH) * rawH;
-
-    const bw = x2 - x1;
-    const bh = y2 - y1;
-
-    if (bw < 6 || bh < 5) {
-      continue;
-    }
-
-    // Approximate DB "unclip" with bbox expansion.
-    const cx = (x1 + x2) / 2;
-    const cy = (y1 + y2) / 2;
-
-    const ew = bw * DET_UNCLIP;
-    const eh = bh * DET_UNCLIP;
-
-    x1 = clamp(cx - ew / 2, 0, rawW - 1);
-    y1 = clamp(cy - eh / 2, 0, rawH - 1);
-    x2 = clamp(cx + ew / 2, 1, rawW);
-    y2 = clamp(cy + eh / 2, 1, rawH);
-
-    components.push({
-      x1,
-      y1,
-      x2,
-      y2,
-      score,
-    });
-  }
-
-  return components
-    .sort((a, b) => {
-      const ay = (a.y1 + a.y2) / 2;
-      const by = (b.y1 + b.y2) / 2;
-
-      if (Math.abs(ay - by) > 12) {
-        return ay - by;
-      }
-
-      return a.x1 - b.x1;
-    })
-    .slice(0, DET_MAX_BOXES);
-};
-
-const detectTextBoxes = async (
-  session: InferenceSession,
-  raw: RawImage,
-): Promise<TextBox[]> => {
-  const {
-    input,
-    targetW,
-    targetH,
-  } = buildDetectorInput(raw);
-
-  const inputName = session.inputNames[0];
-  const outputName = session.outputNames[0];
-
-  const tensor = new Tensor(
-    'float32',
-    input,
-    [1, 3, targetH, targetW],
-  );
-
-  const outputs = await session.run({
-    [inputName]: tensor,
-  });
-
-  const output = outputs[outputName];
-
-  if (!output) {
-    throw new Error(
-      'Model 1 ONNX không trả output.',
-    );
-  }
-
-  const dims = output.dims.map(Number);
-
-  if (dims.length !== 4) {
-    throw new Error(
-      `Model 1 output dims lạ: ${JSON.stringify(dims)}`,
-    );
-  }
-
-  const mapH = dims[dims.length - 2];
-  const mapW = dims[dims.length - 1];
-
-  const data = output.data as Float32Array;
-
-  if (data.length < mapH * mapW) {
-    throw new Error(
-      `Model 1 output thiếu dữ liệu: ${data.length}`,
-    );
-  }
-
-  const probs =
-    data.length === mapH * mapW
-      ? data
-      : data.slice(0, mapH * mapW);
-
-  const boxes = connectedBoxesFromDbMap(
-    probs,
-    mapH,
-    mapW,
-    raw.width,
-    raw.height,
-  );
-
-  console.log(
-    'MODEL 1:',
-    `${raw.width}x${raw.height}`,
-    '->',
-    `${targetW}x${targetH}`,
-    'map',
-    `${mapW}x${mapH}`,
-    'boxes',
-    boxes.length,
-  );
-
-  return boxes;
-};
-
-const buildRecognizerInput = (
-  raw: RawImage,
-  box: TextBox,
-) => {
-  const bw = Math.max(1, box.x2 - box.x1);
-  const bh = Math.max(1, box.y2 - box.y1);
-
-  const padX = bw * 0.08;
-  const padY = bh * 0.18;
-
-  const x1 = clamp(
-    box.x1 - padX,
-    0,
-    raw.width - 1,
-  );
-  const y1 = clamp(
-    box.y1 - padY,
-    0,
-    raw.height - 1,
-  );
-  const x2 = clamp(
-    box.x2 + padX,
-    1,
-    raw.width,
-  );
-  const y2 = clamp(
-    box.y2 + padY,
-    1,
-    raw.height,
-  );
-
-  const cropW = Math.max(1, x2 - x1);
-  const cropH = Math.max(1, y2 - y1);
-
-  const ratio = cropW / cropH;
-
-  const resizedW = Math.min(
-    REC_W,
-    Math.max(1, Math.ceil(REC_H * ratio)),
-  );
-
-  const input =
-    new Float32Array(3 * REC_H * REC_W);
-
-  // Paddle RecResizeImg pads with zeros after [-1, 1] normalization.
-  input.fill(0);
-
-  const plane = REC_H * REC_W;
-
-  for (let y = 0; y < REC_H; y++) {
-    const sy =
-      y1 +
-      ((y + 0.5) / REC_H) *
-        (y2 - y1);
-
-    for (let x = 0; x < resizedW; x++) {
-      const sx =
-        x1 +
-        ((x + 0.5) / resizedW) *
-          (x2 - x1);
-
-      const [r, g, b] =
-        sampleRgbBilinear(raw, sx, sy);
-
-      const pos = y * REC_W + x;
-
-      // RecResizeImg operates on BGR image.
-      input[pos] = b / 127.5 - 1;
-      input[plane + pos] =
-        g / 127.5 - 1;
-      input[plane * 2 + pos] =
-        r / 127.5 - 1;
-    }
-  }
-
-  return input;
-};
-
-const decodeCtcAt = (
-  outputData: Float32Array,
-  dims: readonly number[],
-  dictionary: string[],
-  batchIndex: number,
-) => {
-  if (dims.length !== 3) {
-    throw new Error(
-      `Model 2 output dims lạ: ${JSON.stringify(dims)}`,
-    );
-  }
-
-  const batch = Number(dims[0]);
-  const timeSteps = Number(dims[1]);
-  const classes = Number(dims[2]);
-
-  if (batchIndex < 0 || batchIndex >= batch) {
-    throw new Error(
-      `Batch index ${batchIndex} vượt output batch ${batch}.`,
-    );
-  }
-
-  const sampleSize = timeSteps * classes;
-  const sampleOffset = batchIndex * sampleSize;
-
-  if (sampleOffset + sampleSize > outputData.length) {
-    throw new Error(
-      'Model 2 output data không khớp dims.',
-    );
-  }
-
-  const chars =
-    classes === dictionary.length + 2
-      ? ['blank', ...dictionary, ' ']
-      : ['blank', ...dictionary];
-
-  let previous = -1;
-  const outChars: string[] = [];
-  const margins: number[] = [];
-
-  for (let t = 0; t < timeSteps; t++) {
-    const base =
-      sampleOffset + t * classes;
-
-    let bestIndex = 0;
-    let best = -Infinity;
-    let second = -Infinity;
-
-    for (let c = 0; c < classes; c++) {
-      const value = Number(outputData[base + c]);
-
-      if (value > best) {
-        second = best;
-        best = value;
-        bestIndex = c;
-      } else if (value > second) {
-        second = value;
-      }
-    }
-
-    if (
-      bestIndex !== 0 &&
-      bestIndex !== previous
-    ) {
-      const ch = chars[bestIndex];
-
-      if (typeof ch === 'string') {
-        outChars.push(ch);
-
-        margins.push(
-          1 / (1 + Math.exp(-(best - second))),
-        );
-      }
-    }
-
-    previous = bestIndex;
-  }
-
-  const confidence =
-    margins.length > 0
-      ? margins.reduce((a, b) => a + b, 0) /
-        margins.length
-      : 0;
-
-  return {
-    text: outChars.join(''),
-    confidence,
-  };
-};
-
-const recognizeBatch = async (
-  session: InferenceSession,
-  raw: RawImage,
-  boxes: TextBox[],
-  dictionary: string[],
-): Promise<OcrLine[]> => {
-  if (boxes.length === 0) {
-    return [];
-  }
-
-  const singleSize = 3 * REC_H * REC_W;
-  const batchData =
-    new Float32Array(boxes.length * singleSize);
-
-  for (let i = 0; i < boxes.length; i++) {
-    const single =
-      buildRecognizerInput(raw, boxes[i]);
-
-    batchData.set(
-      single,
-      i * singleSize,
-    );
-  }
-
-  const inputName = session.inputNames[0];
-  const outputName = session.outputNames[0];
-
-  const tensor = new Tensor(
-    'float32',
-    batchData,
-    [boxes.length, 3, REC_H, REC_W],
-  );
-
-  const outputs = await session.run({
-    [inputName]: tensor,
-  });
-
-  const output = outputs[outputName];
-
-  if (!output) {
-    throw new Error(
-      'Model 2 ONNX không trả output.',
-    );
-  }
-
-  const dims = output.dims.map(Number);
-  const data = output.data as Float32Array;
-
-  const lines: OcrLine[] = [];
-
-  for (let i = 0; i < boxes.length; i++) {
-    const decoded = decodeCtcAt(
-      data,
-      dims,
-      dictionary,
-      i,
-    );
-
-    lines.push({
-      ...boxes[i],
-      text: decoded.text,
-      confidence: decoded.confidence,
-    });
-  }
-
-  return lines;
-};
 
 type ScoredLine = OcrLine & {
   index: number;
@@ -2121,165 +1456,57 @@ const chooseAcrossRotations = (
   };
 };
 
-const runOrientation = async (
-  detector: InferenceSession,
-  recognizer: InferenceSession,
-  dictionary: string[],
-  original: RawImage,
+
+
+const nativeProfileText = (
+  degree: number,
+  native: NativeOrientationResult,
+) => {
+  const p = native.profile || {};
+  return (
+    `NATIVE R${degree}: ` +
+    `decode=${p.decodeMs ?? 0}ms, ` +
+    `deskew=${Number(p.deskewDeg ?? 0).toFixed(1)}°, ` +
+    `deskewMs=${p.deskewMs ?? 0}ms, ` +
+    `rotate=${p.rotateMs ?? 0}ms, ` +
+    `detPrep=${p.detPrepMs ?? 0}ms, ` +
+    `detOnnx=${p.detOnnxMs ?? 0}ms, ` +
+    `detPost=${p.detPostMs ?? 0}ms, ` +
+    `boxes=${p.boxes ?? native.lines.length}, ` +
+    `recBatches=${p.recBatches ?? 0}, ` +
+    `recPrep=${p.recPrepMs ?? 0}ms, ` +
+    `recOnnx=${p.recOnnxMs ?? 0}ms, ` +
+    `ctc=${p.ctcMs ?? 0}ms, ` +
+    `total=${p.totalMs ?? 0}ms`
+  );
+};
+
+const runNativeOrientation = async (
+  path: string,
   orientation: 0 | 90 | 180 | 270,
 ): Promise<RotationPhoneResult> => {
-  const orientationStart =
-    Date.now();
-
-  const raw =
-    rotateRaw(
-      original,
+  const native: NativeOrientationResult =
+    await NativeOcr.scanOrientation(
+      path,
       orientation,
     );
 
-  const detStart =
-    Date.now();
+  const lines = (native.lines || [])
+    .filter(
+      line =>
+        String(line.text || '').trim().length > 0 &&
+        Number(line.confidence || 0) >= 0.2,
+    )
+    .sort((a, b) => {
+      const ay = (a.y1 + a.y2) / 2;
+      const by = (b.y1 + b.y2) / 2;
 
-  const boxes =
-    await detectTextBoxes(
-      detector,
-      raw,
-    );
-
-  const detMs =
-    Date.now() -
-    detStart;
-
-  const lines: OcrLine[] =
-    [];
-
-  let recMs = 0;
-
-  // IMPORTANT V4:
-  // OCR theo batch và chấm V4 tăng dần.
-  // Chỉ early-stop khi đã có đủ receiver/sender evidence + >=2 phone candidates.
-  for (
-    let startIndex = 0;
-    startIndex <
-    boxes.length;
-    startIndex +=
-    REC_BATCH_SIZE
-  ) {
-    const batch =
-      boxes.slice(
-        startIndex,
-        startIndex +
-          REC_BATCH_SIZE,
-      );
-
-    try {
-      const recStart =
-        Date.now();
-
-      const batchLines =
-        await recognizeBatch(
-          recognizer,
-          raw,
-          batch,
-          dictionary,
-        );
-
-      recMs +=
-        Date.now() -
-        recStart;
-
-      for (
-        const line of
-          batchLines
-      ) {
-        if (
-          line.text
-            .trim()
-            .length >
-            0 &&
-          line.confidence >=
-            0.2
-        ) {
-          lines.push(
-            line,
-          );
-        }
-      }
-
-      // ==================================================
-      // FAST-SAFE INSIDE ONE ROTATION
-      // ==================================================
-      // V4 cũ phải OCR hết mọi box rồi mới chấm.
-      // Trên mobile điều này rất chậm vì một bill có thể 40-50 box.
-      //
-      // Sau mỗi batch, thử chấm tạm. Chỉ dừng khi:
-      // - đã thấy cả receiver + sender anchor
-      // - có ít nhất 2 phone candidates
-      // - top candidate HIGH
-      // - margin >= 2
-      //
-      // Như vậy không dừng chỉ vì gặp SĐT đầu tiên.
-      if (lines.length >= 6) {
-        const partial =
-          extractReceiverForRotation(
-            lines,
-            orientation,
-          );
-
-        if (
-          partial.phone &&
-          partial.confidence === 'HIGH' &&
-          partial.receiverAnchors.length > 0 &&
-          partial.senderAnchors.length > 0 &&
-          partial.candidateScores.length >= 2 &&
-          partial.margin !== null &&
-          partial.margin >= 2 &&
-          partial.score !== null &&
-          partial.score >= 4
-        ) {
-          console.log(
-            `⚡ PARTIAL V4 ACCEPT ${orientation}°:`,
-            partial.phone,
-            `lines=${lines.length}`,
-            `candidates=${partial.candidateScores.length}`,
-            `score=${partial.score.toFixed(2)}`,
-            `margin=${partial.margin.toFixed(2)}`,
-          );
-
-          break;
-        }
-      }
-    } catch (error) {
-      console.warn(
-        `OCR batch ${startIndex}-${startIndex + batch.length - 1} fail:`,
-        error,
-      );
-    }
-  }
-
-  lines.sort(
-    (a, b) => {
-      const ay =
-        (a.y1 + a.y2) /
-        2;
-
-      const by =
-        (b.y1 + b.y2) /
-        2;
-
-      if (
-        Math.abs(
-          ay - by,
-        ) > 14
-      ) {
+      if (Math.abs(ay - by) > 14) {
         return ay - by;
       }
 
-      return (
-        a.x1 - b.x1
-      );
-    },
-  );
+      return a.x1 - b.x1;
+    });
 
   const result =
     extractReceiverForRotation(
@@ -2287,292 +1514,174 @@ const runOrientation = async (
       orientation,
     );
 
-  const totalMs =
-    Date.now() -
-    orientationStart;
-
-  console.log(
-    `===== OCR V4 ${orientation}° =====`,
-  );
-
-  for (
-    const line of lines
-  ) {
-    console.log(
-      `[${line.confidence.toFixed(2)}]`,
-      line.text,
+  const profile =
+    nativeProfileText(
+      orientation,
+      native,
     );
-  }
 
   console.log(
-    `🎯 ROTATION V4 ${orientation}°:`,
-    result.phone ??
-      'UNCERTAIN',
-    `score=${
-      result.score ===
-      null
-        ? 'null'
-        : result.score.toFixed(
-            2,
-          )
-    }`,
+    `🎯 NATIVE V4 ${orientation}°:`,
+    result.phone ?? 'UNCERTAIN',
     `confidence=${result.confidence}`,
-    `method=${result.method}`,
+    `score=${
+      result.score === null
+        ? 'null'
+        : result.score.toFixed(2)
+    }`,
+    `margin=${
+      result.margin === null
+        ? 'null'
+        : result.margin.toFixed(2)
+    }`,
   );
 
-  console.log(
-    `⏱️ OCR ${orientation}° timing:`,
-    `det=${detMs}ms`,
-    `rec=${recMs}ms`,
-    `total=${totalMs}ms`,
-  );
+  console.log(profile);
 
   return {
     ...result,
+    nativeProfile: profile,
     debug:
       `${result.debug}, ` +
-      `boxes=${boxes.length}, ` +
-      `ocrLines=${lines.length}, ` +
-      `det=${detMs}ms, ` +
-      `rec=${recMs}ms, ` +
-      `total=${totalMs}ms`,
+      `recvAnchors=${result.receiverAnchors.length}, ` +
+      `sendAnchors=${result.senderAnchors.length}, ` +
+      profile,
   };
-};
-
-const createFastSession = async (
-  modelPath: string,
-) => {
-  console.log(
-    '🛡️ Creating ONNX session in SAFE CPU mode...',
-  );
-
-  return InferenceSession.create(
-    modelPath,
-    {
-      // Native crash was observed inside libonnxruntime during session.run.
-      // Use CPU only first; XNNPACK can be re-enabled later after stability is proven.
-      executionProviders: ['cpu'],
-
-      graphOptimizationLevel: 'all',
-
-      // Keep memory predictable on Android / emulator.
-      intraOpNumThreads: 1,
-      interOpNumThreads: 1,
-      executionMode: 'sequential',
-
-      // Disable native memory caching/pattern optimization for dynamic OCR calls.
-      enableCpuMemArena: false,
-      enableMemPattern: false,
-    },
-  );
 };
 
 export const createSmartLockerOcr =
   async (): Promise<SmartLockerOcrEngine> => {
-    console.log(
-      '====================================',
-    );
-    console.log(
-      '🚀 Loading SmartLocker ONNX OCR...',
-    );
-
-    const detectorPath =
-      await copyAssetFresh(
-        'smartlocker/model1_detector.onnx',
-        'smartlocker_model1_detector.onnx',
+    if (
+      !NativeOcr ||
+      typeof NativeOcr.initialize !== 'function' ||
+      typeof NativeOcr.scanOrientation !== 'function'
+    ) {
+      throw new Error(
+        'SmartLockerOcrNative chưa được đăng ký. Hãy kiểm tra MainApplication.kt và rebuild Android.',
       );
-
-    const recognizerPath =
-      await copyAssetFresh(
-        'smartlocker/model2_recognizer.onnx',
-        'smartlocker_model2_recognizer.onnx',
-      );
-
-    const keyText =
-      await RNFS.readFileAssets(
-        'smartlocker/ppocr_keys.txt',
-        'utf8',
-      );
-
-    const dictionary =
-      keyText
-        .split(/\r?\n/)
-        .filter(line => line.length > 0);
+    }
 
     console.log(
-      'OCR dictionary:',
-      dictionary.length,
-      'characters',
+      '🚀 Loading SmartLocker Native OCR...',
     );
 
-    const detector =
-      await createFastSession(
-        detectorPath,
-      );
-
-    const recognizer =
-      await createFastSession(
-        recognizerPath,
-      );
+    const initInfo =
+      await NativeOcr.initialize();
 
     console.log(
-      '✅ MODEL 1 ONNX:',
-      detector.inputNames,
-      '->',
-      detector.outputNames,
-    );
-
-    console.log(
-      '✅ MODEL 2 ONNX:',
-      recognizer.inputNames,
-      '->',
-      recognizer.outputNames,
-    );
-
-    console.log(
-      '✅ SmartLocker ONNX OCR READY',
-    );
-    console.log(
-      '====================================',
+      '✅ SmartLocker Native OCR READY',
+      initInfo,
     );
 
     const scanJpeg = async (
       path: string,
     ): Promise<ReceiverPhoneResult> => {
-      const totalStart =
-        Date.now();
+      const totalStart = Date.now();
 
-      const decodeStart =
-        Date.now();
+      const rotations:
+        RotationPhoneResult[] = [];
 
-      const original =
-        await decodeJpeg(
-          path,
-        );
-
-      const decodeMs =
-        Date.now() -
-        decodeStart;
-
-      console.log(
-        '📷 OCR SOURCE:',
-        `${original.width}x${original.height}`,
-        `decode=${decodeMs}ms`,
-      );
-
-      // V4 benchmark dùng đủ 4 rotations.
-      // Không accept 0° sớm, vì số đầu tiên có thể là sender.
       const orientations:
-        Array<
-          0 | 90 | 180 | 270
-        > = [
+        Array<0 | 90 | 180 | 270> = [
           0,
           90,
           270,
           180,
         ];
 
-      const rotations:
-        RotationPhoneResult[] =
-          [];
-
       for (
-        const degree of
-          orientations
+        const degree of orientations
       ) {
-        try {
-          const current =
-            await runOrientation(
-              detector,
-              recognizer,
-              dictionary,
-              original,
-              degree,
-            );
-
-          rotations.push(
-            current,
+        const current =
+          await runNativeOrientation(
+            path,
+            degree,
           );
 
-          // ==================================================
-          // MOBILE FAST-SAFE EXIT
-          // ==================================================
-          // Ảnh chụp từ camera thường đã đúng chiều.
-          // Nếu 0° có đầy đủ bằng chứng receiver + sender,
-          // candidate thắng rõ và confidence HIGH thì không
-          // cần chạy thêm 3 lần OCR nặng.
+        rotations.push(
+          current,
+        );
+
+        // ==================================================
+        // NATIVE FAST PATH V3 — TRUST R0 V4 HIGH
+        // ==================================================
+        // V4 itself already defines HIGH conservatively:
+        //
+        // 1 candidate:
+        //   score >= 4
+        //
+        // >=2 candidates:
+        //   top score >= 4 AND margin >= 2
+        //
+        // Phone candidates have already passed:
+        // - Vietnamese mobile validation
+        // - hotline / tracking / order-id rejection
+        // - receiver/sender spatial scoring
+        //
+        // Therefore, after native deskew, if R0 itself is HIGH,
+        // running 90/270/180 again is redundant for the common case.
+        //
+        // Difficult cases still keep the full rotation fallback.
+        const r0HighEnough =
+          degree === 0 &&
+          current.phone !== null &&
+          current.confidence === 'HIGH' &&
+          current.score !== null &&
+          current.score >= 4;
+
+        if (r0HighEnough) {
+          console.log(
+            '⚡ NATIVE FAST V3 ACCEPT R0:',
+            current.phone,
+            `score=${current.score?.toFixed(2)}`,
+            `margin=${
+              current.margin === null
+                ? 'single'
+                : current.margin.toFixed(2)
+            }`,
+            `candidates=${current.candidateScores.length}`,
+            `receiverAnchors=${current.receiverAnchors.length}`,
+            `senderAnchors=${current.senderAnchors.length}`,
+          );
+
+          break;
+        }
+
+        if (rotations.length >= 2) {
+          const partial =
+            chooseAcrossRotations(
+              rotations,
+            );
+
+          const agreeing =
+            partial.phone
+              ? rotations.filter(
+                  item =>
+                    item.phone ===
+                    partial.phone,
+                ).length
+              : 0;
+
           if (
-            degree === 0 &&
-            current.phone &&
-            current.confidence === 'HIGH' &&
-            current.receiverAnchors.length > 0 &&
-            current.senderAnchors.length > 0 &&
-            current.score !== null &&
-            current.score >= 4 &&
-            (
-              current.margin === null ||
-              current.margin >= 2
-            )
+            partial.phone &&
+            partial.confidence === 'HIGH' &&
+            agreeing >= 2
           ) {
             console.log(
-              '⚡ FAST-SAFE ACCEPT 0°:',
-              current.phone,
-              `score=${current.score.toFixed(2)}`,
-              `margin=${
-                current.margin === null
-                  ? 'single'
-                  : current.margin.toFixed(2)
-              }`,
+              '⚡ NATIVE FAST AGREEMENT:',
+              partial.phone,
             );
+
             break;
           }
-
-          // Nếu 0° chưa đủ chắc, chạy thêm 90°.
-          // Khi hai rotation độc lập cùng chọn một số và
-          // aggregate đã HIGH thì có thể dừng an toàn.
-          if (rotations.length >= 2) {
-            const partial =
-              chooseAcrossRotations(
-                rotations,
-              );
-
-            const agreeing =
-              partial.phone
-                ? rotations.filter(
-                    item =>
-                      item.phone ===
-                      partial.phone,
-                  ).length
-                : 0;
-
-            if (
-              partial.phone &&
-              partial.confidence === 'HIGH' &&
-              agreeing >= 2
-            ) {
-              console.log(
-                '⚡ FAST-SAFE AGREEMENT:',
-                partial.phone,
-                `agree=${agreeing}`,
-                `score=${partial.score.toFixed(2)}`,
-              );
-              break;
-            }
-          }
-        } catch (error) {
-          console.warn(
-            `Orientation ${degree}° failed:`,
-            error,
-          );
         }
       }
 
       if (
-        rotations.length ===
-        0
+        rotations.length === 0
       ) {
         throw new Error(
-          'Không orientation nào chạy OCR được.',
+          'Native OCR không chạy được orientation nào.',
         );
       }
 
@@ -2581,14 +1690,10 @@ export const createSmartLockerOcr =
           rotations,
         );
 
-      // Chọn rotation đại diện để giữ compatibility
-      // với UI cũ (orientation / lines / selectedLine).
       let representative =
         rotations[0];
 
-      if (
-        final.phone
-      ) {
+      if (final.phone) {
         const matching =
           rotations.filter(
             rotation =>
@@ -2596,47 +1701,15 @@ export const createSmartLockerOcr =
               final.phone,
           );
 
-        if (
-          matching.length >
-          0
-        ) {
+        if (matching.length > 0) {
           representative =
-            matching.sort(
+            [...matching].sort(
               (a, b) =>
                 (b.score ??
                   Number.NEGATIVE_INFINITY) -
                 (a.score ??
                   Number.NEGATIVE_INFINITY),
             )[0];
-        } else {
-          // Trường hợp final phone thắng nhờ candidate evidence
-          // dù không được chọn riêng ở rotation nào.
-          let bestCandidateScore =
-            Number.NEGATIVE_INFINITY;
-
-          for (
-            const rotation of
-              rotations
-          ) {
-            const candidate =
-              rotation.candidateScores.find(
-                item =>
-                  item.phone ===
-                  final.phone,
-              );
-
-            if (
-              candidate &&
-              candidate.score >
-                bestCandidateScore
-            ) {
-              bestCandidateScore =
-                candidate.score;
-
-              representative =
-                rotation;
-            }
-          }
         }
       } else {
         representative =
@@ -2650,40 +1723,34 @@ export const createSmartLockerOcr =
       }
 
       const totalMs =
-        Date.now() -
-        totalStart;
+        Date.now() - totalStart;
 
       const score =
         final.score ?? 0;
 
-      console.log(
-        '🎯 FINAL RECEIVER V4:',
-        final.phone ??
-          'UNCERTAIN',
-        `confidence=${final.confidence}`,
-        `method=${final.method}`,
-        `score=${score.toFixed(2)}`,
-        `margin=${
-          final.margin ===
-          null
-            ? 'null'
-            : final.margin.toFixed(
-                2,
-              )
-        }`,
-        `scanTotal=${totalMs}ms`,
-      );
+      const profileLines =
+        rotations
+          .map(
+            r =>
+              r.nativeProfile || '',
+          )
+          .filter(Boolean)
+          .join('\n');
+
+      const finalMethod =
+        rotations.length === 1 &&
+        final.phone
+          ? 'NATIVE_FAST_V4'
+          : final.method;
 
       return {
-        phone:
-          final.phone,
+        phone: final.phone,
         score,
-        margin:
-          final.margin,
+        margin: final.margin,
         confidence:
           final.confidence,
         method:
-          final.method,
+          finalMethod,
         orientation:
           representative.orientation,
         lines:
@@ -2701,42 +1768,37 @@ export const createSmartLockerOcr =
             : undefined,
         rotations,
         debug:
-          `V4 phone=${
+          `Native V4 phone=${
             final.phone ??
             'UNCERTAIN'
           }, ` +
           `confidence=${final.confidence}, ` +
-          `method=${final.method}, ` +
+          `method=${finalMethod}, ` +
           `score=${score.toFixed(2)}, ` +
           `margin=${
-            final.margin ===
-            null
+            final.margin === null
               ? 'null'
-              : final.margin.toFixed(
-                  2,
-                )
+              : final.margin.toFixed(2)
           }, ` +
-          `representative=${representative.orientation}°, ` +
-          `decode=${decodeMs}ms, ` +
-          `scanTotal=${totalMs}ms`,
+          `rotations=${rotations.length}, ` +
+          `scanTotal=${totalMs}ms` +
+          (
+            profileLines
+              ? `\n${profileLines}`
+              : ''
+          ),
       };
     };
 
-    const dispose = async () => {
-      try {
-        await detector.release();
-      } catch {}
-
-      try {
-        await recognizer.release();
-      } catch {}
-    };
+    const dispose =
+      async () => {
+        try {
+          await NativeOcr.dispose();
+        } catch {}
+      };
 
     return {
-      detector,
-      recognizer,
-      dictionary,
-      scanJpeg,
       dispose,
+      scanJpeg,
     };
   };

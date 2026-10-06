@@ -236,12 +236,18 @@ export const ShipperScreen = ({
     setDebugInfo('');
 
     try {
+      const flowStart =
+        Date.now();
+
       console.log(
         '------------------------------------',
       );
       console.log(
         '📷 CAMERA: Chụp full bill...',
       );
+
+      const captureStart =
+        Date.now();
 
       const result =
         await photoOutput.capturePhotoToFile(
@@ -251,6 +257,11 @@ export const ShipperScreen = ({
           },
           {},
         );
+
+      const captureMs =
+        Date.now() -
+        captureStart;
+
       if (!result?.filePath) {
         throw new Error(
           'Camera không trả về filePath.',
@@ -271,6 +282,9 @@ export const ShipperScreen = ({
       // but avoid feeding a huge camera JPEG to JS.
       const resizer = getResizer();
 
+      const resizeStart =
+        Date.now();
+
       const resized =
         await resizer(
           photoPath,
@@ -287,6 +301,10 @@ export const ShipperScreen = ({
           },
         );
 
+      const resizeMs =
+        Date.now() -
+        resizeStart;
+
       const workPath =
         normalizePath(
           resized?.path ||
@@ -299,13 +317,41 @@ export const ShipperScreen = ({
         workPath,
       );
 
+      const aiStart =
+        Date.now();
+
       const ai =
         await engine.scanJpeg(
           workPath,
         );
 
+      const aiMs =
+        Date.now() -
+        aiStart;
+
+      const flowMs =
+        Date.now() -
+        flowStart;
+
+      console.log(
+        '====================================',
+      );
+      console.log(
+        '📊 SMARTLOCKER APP PROFILE',
+      );
+      console.log(
+        `capture=${captureMs}ms`,
+        `resize=${resizeMs}ms`,
+        `ai=${aiMs}ms`,
+        `flowTotal=${flowMs}ms`,
+      );
+      console.log(
+        '====================================',
+      );
+
       setDebugInfo(
-        ai.debug +
+        `APP PROFILE: capture=${captureMs}ms, resize=${resizeMs}ms, ai=${aiMs}ms, total=${flowMs}ms\n` +
+          ai.debug +
           '\n' +
           ai.lines
             .slice(0, 16)
@@ -325,7 +371,9 @@ export const ShipperScreen = ({
             `Độ tin cậy: ${ai.confidence}\n` +
             `Phương pháp: ${ai.method}\n` +
             `Góc đại diện: ${ai.orientation}°\n` +
-            `OCR lines: ${ai.lines.length}`,
+            `OCR lines: ${ai.lines.length}\n` +
+            `AI time: ${(aiMs / 1000).toFixed(1)}s\n` +
+            `Tổng từ lúc bấm chụp: ${(flowMs / 1000).toFixed(1)}s`,
         );
       } else {
         Alert.alert(

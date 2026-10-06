@@ -86,7 +86,7 @@ android {
         versionName "1.0"
     }
     aaptOptions {
-        noCompress 'tflite'
+        noCompress 'tflite', 'onnx'
     }
     signingConfigs {
         debug {
@@ -111,6 +111,10 @@ android {
 }
 
 dependencies {
+    // Native ONNX Runtime Java/Kotlin API used by SmartLockerOcrNativeModule.
+    // Pinned for reproducible Android builds.
+    implementation "com.microsoft.onnxruntime:onnxruntime-android:1.29.0"
+
     // The version of react-native is set by the React Native Gradle Plugin
     implementation("com.facebook.react:react-android")
 
