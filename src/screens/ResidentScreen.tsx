@@ -226,14 +226,14 @@ export default function ResidentScreen({
     );
 
   const [
-    fcmStatus,
+    ,
     setFcmStatus,
   ] = useState(
     'Đang khởi tạo thông báo...',
   );
 
   const [
-    fcmTokenPreview,
+    ,
     setFcmTokenPreview,
   ] = useState('');
 
@@ -1069,48 +1069,6 @@ export default function ResidentScreen({
 
         <View
           style={
-            styles.infoCard
-          }
-        >
-          <Text
-            style={
-              styles.infoTitle
-            }
-          >
-            🔔 Firebase Notification
-          </Text>
-
-          <Text
-            style={
-              styles.infoText
-            }
-          >
-            {fcmStatus}
-          </Text>
-
-          {!!fcmTokenPreview && (
-            <Text
-              style={
-                styles.tokenPreview
-              }
-            >
-              Thiết bị: {
-                fcmTokenPreview
-              }
-            </Text>
-          )}
-
-          <Text
-            style={
-              styles.tapHint
-            }
-          >
-            Khi app chạy nền hoặc đã đóng, thông báo vẫn hiện trên thanh trạng thái. Bấm vào thông báo sẽ mở đúng đơn hàng này.
-          </Text>
-        </View>
-
-        <View
-          style={
             styles.sectionHeader
           }
         >
@@ -1219,13 +1177,6 @@ export default function ResidentScreen({
               Chưa có kiện hàng
             </Text>
 
-            <Text
-              style={
-                styles.emptyText
-              }
-            >
-              Khi Shipper giao hàng, backend tự chọn tủ trống và Firebase sẽ báo về điện thoại.
-            </Text>
           </View>
         ) : (
           readyPackages.map(
@@ -1478,13 +1429,6 @@ export default function ResidentScreen({
                     </>
                   )}
 
-                  <Text
-                    style={
-                      styles.oneTimeHint
-                    }
-                  >
-                    OTP chỉ dùng một lần. Sau khi mở tủ thành công, đơn sẽ rời khỏi danh sách chờ lấy.
-                  </Text>
                 </View>
               );
             },

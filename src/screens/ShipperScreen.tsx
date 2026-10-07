@@ -119,11 +119,6 @@ export const ShipperScreen = ({
     setIsCreatingOrder,
   ] = useState(false);
 
-  const [
-    debugInfo,
-    setDebugInfo,
-  ] = useState('');
-
   // ==========================================================
   // CAMERA PERMISSION
   // ==========================================================
@@ -233,7 +228,6 @@ export const ShipperScreen = ({
 
     setIsScanning(true);
     setCaptureLocked(false);
-    setDebugInfo('');
 
     try {
       const flowStart =
@@ -347,19 +341,6 @@ export const ShipperScreen = ({
       );
       console.log(
         '====================================',
-      );
-
-      setDebugInfo(
-        `APP PROFILE: capture=${captureMs}ms, resize=${resizeMs}ms, ai=${aiMs}ms, total=${flowMs}ms\n` +
-          ai.debug +
-          '\n' +
-          ai.lines
-            .slice(0, 16)
-            .map(
-              l =>
-                `${l.confidence.toFixed(2)} | ${l.text}`,
-            )
-            .join('\n'),
       );
 
       if (ai.phone) {
@@ -689,68 +670,6 @@ export const ShipperScreen = ({
       </View>
 
       <View
-        style={
-          styles.softwareModeCard
-        }
-      >
-        <Text
-          style={
-            styles.softwareModeTitle
-          }
-        >
-          🧠 PP-OCRv6 ONNX + FIREBASE
-        </Text>
-
-        <Text
-          style={
-            styles.softwareModeText
-          }
-        >
-          Model 1 tìm các vùng chữ, Model 2 chuyển từng box thành text. V4 lọc SĐT Việt Nam, xác định Người nhận / Người gửi, chấm điểm và tổng hợp 4 hướng xoay.
-        </Text>
-      </View>
-
-      <View
-        style={styles.aiStatus}
-      >
-        {isModelLoading ? (
-          <>
-            <ActivityIndicator
-              size="small"
-              color="#FF6B00"
-            />
-
-            <Text
-              style={
-                styles.aiStatusText
-              }
-            >
-              Đang nạp PP-OCRv6 ONNX...
-            </Text>
-          </>
-        ) : aiReady ? (
-          <Text
-            style={
-              styles.aiReadyText
-            }
-          >
-            ✅ AI sẵn sàng - PP-OCRv6 + Receiver Selector V4
-          </Text>
-        ) : (
-          <Text
-            style={
-              styles.aiErrorText
-            }
-          >
-            ❌ AI chưa sẵn sàng
-            {modelError
-              ? `: ${modelError}`
-              : ''}
-          </Text>
-        )}
-      </View>
-
-      <View
         style={styles.cameraBox}
       >
         <Camera
@@ -781,13 +700,6 @@ export const ShipperScreen = ({
             styles.overlayFrame
           }
         >
-          <Text
-            style={
-              styles.overlayText
-            }
-          >
-            Đưa toàn bộ bill vào khung, chữ càng rõ càng tốt
-          </Text>
         </View>
 
         {isScanning && (
@@ -841,28 +753,6 @@ export const ShipperScreen = ({
           </Text>
         )}
       </TouchableOpacity>
-
-      {!!debugInfo && (
-        <View
-          style={styles.debugBox}
-        >
-          <Text
-            style={
-              styles.debugTitle
-            }
-          >
-            PP-OCRv6 + V4 Debug
-          </Text>
-
-          <Text
-            style={
-              styles.debugText
-            }
-          >
-            {debugInfo}
-          </Text>
-        </View>
-      )}
 
       <View
         style={styles.formGroup}
@@ -932,11 +822,6 @@ export const ShipperScreen = ({
         )}
       </TouchableOpacity>
 
-      <Text
-        style={styles.zaloHint}
-      >
-        AI V4 ưu tiên SĐT người nhận và trả UNCERTAIN khi chưa đủ chắc chắn. Bạn vẫn có thể sửa tay trước khi xác nhận. Backend tiếp tục tự cấp tủ và gửi Firebase như trước.
-      </Text>
     </ScrollView>
   );
 };
