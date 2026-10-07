@@ -1,531 +1,196 @@
-# 🔐 SmartLocker
+# 🔐 SmartLocker — Intelligent Parcel Locker System
 
-SmartLocker là ứng dụng mô phỏng hệ thống **tủ nhận hàng thông minh** dành cho chung cư/ký túc xá, gồm 3 nhóm người dùng:
+SmartLocker là hệ thống **tủ nhận hàng thông minh** dành cho mô hình chung cư/ký túc xá. Phiên bản hiện tại kết hợp 4 phần chính:
 
-- **Shipper**: đăng nhập, chụp bill/nhập số điện thoại người nhận và tạo đơn giao hàng.
-- **Cư dân**: nhận thông báo Firebase, xem OTP, mở tủ và nhận hàng.
-- **Admin**: theo dõi trạng thái tủ, lịch sử giao dịch và mở tủ khẩn cấp.
+- **Ứng dụng Android React Native** cho Shipper, Cư dân và Admin.
+- **Backend Node.js/Express trên Railway** quản lý tài khoản, kiện hàng, OTP, lịch sử và lệnh phần cứng.
+- **AI OCR PP-OCRv6 + ONNX Runtime** để đọc bill và chọn số điện thoại người nhận.
+- **ESP32 + relay** để điều khiển mở/đóng 4 tủ vật lý.
 
-## 1. Kiến trúc hệ thống
-
-```text
-React Native App
-       |
-       v
-Railway Backend
-(Node.js + Express)
-       |
-       +--> SQLite + Railway Volume
-       |
-       +--> Firebase Cloud Messaging
-       |
-       +--> JWT Authentication
-```
-
-Phần AI chạy trực tiếp trên ứng dụng Android bằng **PP-OCRv6 Small + ONNX Runtime**:
-
-```text
-Camera / ảnh bill
-        |
-        v
-PP-OCRv6 Small Text Detector
-(Model 1 - ONNX)
-        |
-        v
-Phát hiện các vùng văn bản trên toàn bill
-        |
-        v
-PP-OCRv6 Small Text Recognizer
-(Model 2 - ONNX)
-        |
-        v
-OCR toàn bộ nội dung bill
-        |
-        v
-FAST-SAFE Receiver Selector
-- ưu tiên vùng Đến / Receiver / Người nhận
-- loại vùng Từ / Sender / Hotline / mã vận đơn
-- chuẩn hóa +84 -> 0
-        |
-        v
-SĐT người nhận
-```
-
-## 2. Công nghệ sử dụng
-
-### Mobile App
-- React Native
-- TypeScript
-- React Navigation
-- AsyncStorage
-- React Native Vision Camera
-- React Native Firebase Messaging
-- ONNX Runtime React Native
-- React Native FS
-- `jpeg-js`
-- React Native Image Resizer
-
-### Backend
-- Node.js
-- Express.js
-- SQLite (`better-sqlite3`)
-- JWT
-- bcryptjs
-- Firebase Admin SDK
-
-### Cloud
-- Railway: chạy backend và lưu SQLite bằng Volume
-- Firebase Cloud Messaging: gửi thông báo đến cư dân
-- GitHub: quản lý source code và tự động deploy Railway
-
-## 3. Chức năng chính
-
-### 🚚 Shipper
-- Đăng ký bằng số điện thoại + mật khẩu.
-- Yêu cầu **mã giới thiệu Shipper** khi đăng ký.
-- Đăng nhập trước khi sử dụng chức năng giao hàng.
-- Chụp ảnh bill bằng camera.
-- AI nhận diện số điện thoại người nhận.
-- Có thể sửa số điện thoại thủ công nếu AI nhận sai.
-- Backend tự chọn tủ trống phù hợp.
-- Tạo đơn và gửi thông báo Firebase đến cư dân.
-
-### 🏠 Cư dân
-- Đăng ký / đăng nhập bằng số điện thoại.
-- Liên kết thiết bị với Firebase Cloud Messaging.
-- Nhận notification khi có hàng mới.
-- Bấm notification để mở đúng đơn hàng.
-- OTP được hiển thị tự động trong ứng dụng.
-- OTP có thời gian hết hạn.
-- Có thể cấp lại OTP khi hết hạn.
-- OTP chỉ dùng một lần.
-- Sau khi mở tủ thành công, đơn rời khỏi danh sách chờ lấy.
-
-### 👨‍💼 Admin
-- Đăng ký bằng mã Admin.
-- Theo dõi trạng thái toàn bộ tủ.
-- Xem tủ đang trống / đang có hàng.
-- Xem lịch sử gửi hàng, nhận hàng và mở khẩn cấp.
-- Mở tủ khẩn cấp khi cần.
-
-## 4. Luồng hoạt động
-
-```text
-Shipper đăng nhập
-        |
-        v
-Chụp bill / nhập SĐT
-        |
-        v
-Backend kiểm tra cư dân
-        |
-        v
-Tự chọn tủ trống
-        |
-        v
-Tạo đơn + OTP
-        |
-        v
-Firebase gửi Notification
-        |
-        v
-Cư dân mở app
-        |
-        v
-OTP tự hiển thị
-        |
-        v
-Cư dân bấm MỞ TỦ
-        |
-        v
-Backend xác minh OTP
-        |
-        v
-Đơn chuyển sang PICKED_UP
-        |
-        v
-Admin History được cập nhật
-```
-
-## 5. Cấu trúc project
-
-```text
-SmartLockerApp/
-├── android/
-│   └── app/
-│       └── src/
-│           └── main/
-│               └── assets/
-│                   └── smartlocker/
-│                       ├── model1_detector.onnx
-│                       ├── model2_recognizer.onnx
-│                       ├── ppocr_keys.txt
-│                       ├── model1_detector_inference.yml
-│                       ├── model2_recognizer_inference.yml
-│                       └── manifest.json
-├── backend/
-│   ├── server.js
-│   ├── database.js
-│   ├── package.json
-│   ├── .env.example
-│   └── smartlocker.db
-├── src/
-│   ├── ai/
-│   │   └── smartlockerOcr.ts
-│   ├── config/api.ts
-│   ├── context/AuthContext.tsx
-│   ├── navigation/AppNavigator.tsx
-│   ├── services/authApi.ts
-│   └── screens/
-│       ├── HomeScreen.tsx
-│       ├── LoginScreen.tsx
-│       ├── RegisterScreen.tsx
-│       ├── ShipperScreen.tsx
-│       ├── ResidentScreen.tsx
-│       ├── AdminScreen.tsx
-│       └── HistoryScreen.tsx
-├── App.tsx
-└── package.json
-```
-
-> `node_modules`, file `.env`, Firebase service-account key và database thật không nên commit lên GitHub.
-
-## 6. Cấu hình Backend
-
-Tạo file:
-
-```text
-backend/.env
-```
-
-Ví dụ:
-
-```env
-PORT=3000
-JWT_SECRET=YOUR_SECRET_KEY
-ADMIN_REGISTER_CODE=YOUR_ADMIN_CODE
-SHIPPER_REGISTER_CODE=123456
-OTP_TTL_MINUTES=15
-FIREBASE_SERVICE_ACCOUNT_PATH=./firebase-service-account.json
-```
-
-Khi chạy trên Railway, nên cấu hình các giá trị trên bằng **Railway Variables** thay vì commit file `.env`.
-
-## Yêu cầu môi trường
-
-Trước khi chạy project, cần cài đặt:
-
-- Node.js
-- npm
-- Android Studio
-- Android SDK
-- JDK
-- Android Emulator hoặc thiết bị Android thật
-
-Tham khảo hướng dẫn thiết lập môi trường React Native:
-
-```text
-https://reactnative.dev/docs/set-up-your-environment
-```
-
-Kiểm tra môi trường:
-
-```bash
-node --version
-npm --version
-adb devices
-```
-
-## 7. Chạy Backend Local
-
-```bash
-cd backend
-npm install
-npm start
-```
-
-Kiểm tra:
-
-```text
-http://localhost:3000/health
-```
-
-Nếu backend hoạt động bình thường sẽ trả về JSON có:
-
-```json
-{
-  "ok": true
-}
-```
-
-## 8. Chạy ứng dụng Android
-
-Cài package:
-
-```bash
-npm install
-```
-
-Khởi động Metro:
-
-```bash
-npx react-native start --reset-cache
-```
-
-Mở terminal khác:
-
-```bash
-npx react-native run-android
-```
-
-## 9. API Backend
-
-Một số endpoint chính:
-
-```text
-POST /auth/register
-POST /auth/login
-GET  /auth/me
-POST /devices/register
-POST /packages
-GET  /packages/my
-POST /packages/:packageId/otp/refresh
-POST /packages/:packageId/redeem
-GET  /admin/overview
-GET  /admin/history
-POST /admin/packages/:packageId/force-open
-GET /health
-```
-
-### Bảo vệ API
-- `/packages` chỉ cho tài khoản `SHIPPER`.
-- `/packages/my` và `/redeem` chỉ cho `RESIDENT`.
-- `/admin/*` chỉ cho `ADMIN`.
-- Request được xác thực bằng JWT.
-
-## 10. Railway + GitHub
-
-Backend được deploy từ GitHub lên Railway.
-
-Khi sửa backend:
-
-```bash
-git add .
-git commit -m "Update SmartLocker"
-git push
-```
-
-Railway sẽ tự động build và deploy lại phiên bản mới.
-
-Các biến bí mật cần đặt trong:
-
-```text
-Railway
-→ smart-locker service
-→ Variables
-```
-
-Ví dụ:
-
-```text
-JWT_SECRET
-ADMIN_REGISTER_CODE
-SHIPPER_REGISTER_CODE
-FIREBASE_SERVICE_ACCOUNT_JSON
-OTP_TTL_MINUTES
-```
-
-## 11. Database
-
-SmartLocker hiện sử dụng:
-
-```text
-SQLite
-+
-Railway Persistent Volume
-```
-
-Các bảng chính:
-
-```text
-users
-devices
-packages
-activity_logs
-```
-
-Trạng thái đơn:
-
-```text
-READY
-PICKED_UP
-CANCELLED
-```
-
-## 12. Firebase Notification
-
-Firebase Cloud Messaging được dùng để thông báo cho cư dân khi Shipper tạo đơn mới.
-
-```text
-Backend Railway
-      |
-      v
-Firebase Admin SDK
-      |
-      v
-Firebase Cloud Messaging
-      |
-      v
-Điện thoại cư dân
-```
-
-Khi app ở background hoặc đóng, notification vẫn có thể xuất hiện trên thanh trạng thái.
-
-## 13. AI nhận diện số điện thoại
-
-Phiên bản hiện tại không còn dùng pipeline YOLO + CRNN/TensorFlow Lite cũ.  
-AI được chuyển sang **PP-OCRv6 Small chạy bằng ONNX Runtime ngay trên Android**.
-
-### 13.1. Hai model AI
-
-#### Model 1 - PP-OCRv6 Small Text Detector
-
-Nhiệm vụ:
-- Nhận toàn bộ ảnh bill từ Camera.
-- Phát hiện các vùng có văn bản trên bill.
-- Không chỉ tìm riêng vùng số điện thoại.
-- Cho phép dùng chung với nhiều mẫu bill khác nhau như Shopee, Lazada, TikTok Shop, J&T, Ninja Van,...
-
-File model:
-
-```text
-android/app/src/main/assets/smartlocker/model1_detector.onnx
-```
-
-Đầu vào của model có dạng:
-
-```text
-N x 3 x H x W
-```
-
-Ảnh được resize, normalize và đưa về định dạng tensor trước khi chạy ONNX Runtime.
+> README này mô tả **luồng hiện tại của gói `SmartLocker_Full_Project_Organized(4)`**. Các luồng cũ như Shipper không cần đăng nhập, QR nhận hàng hoặc AI chạy chủ yếu ở JavaScript không còn là kiến trúc chính của phiên bản này.
 
 ---
 
-#### Model 2 - PP-OCRv6 Small Text Recognizer
+## 1. Tổng quan hệ thống
 
-Nhiệm vụ:
-- Nhận từng vùng chữ do Model 1 phát hiện.
-- Đọc nội dung văn bản trên từng dòng.
-- Hỗ trợ cả chữ, số và ký tự để có thể đọc toàn bộ bill.
+Hệ thống hiện sử dụng 3 vai trò:
 
-File model:
+### 🚚 Shipper
 
-```text
-android/app/src/main/assets/smartlocker/model2_recognizer.onnx
+- Đăng ký bằng số điện thoại, mật khẩu và **mã đăng ký Shipper**.
+- Bắt buộc đăng nhập trước khi tạo đơn.
+- Chụp bill bằng camera hoặc nhập số điện thoại người nhận thủ công.
+- AI OCR đọc bill và tự chọn SĐT người nhận.
+- Có thể kiểm tra/sửa SĐT trước khi gửi.
+- Backend kiểm tra tài khoản Cư dân, tự chọn tủ trống và tạo kiện hàng.
+- Không được nhận OTP của Cư dân.
+
+### 🏠 Cư dân
+
+- Đăng ký/đăng nhập bằng số điện thoại và mật khẩu.
+- Thiết bị Android được liên kết với Firebase Cloud Messaging.
+- Nhận notification khi Shipper tạo đơn.
+- Chạm notification để đi đến màn hình nhận hàng tương ứng.
+- Xem OTP nhận hàng được backend cấp cho đúng tài khoản.
+- Có thể cấp lại OTP khi OTP hết hạn.
+- Dùng OTP để yêu cầu mở tủ.
+- Trong ESP32 mode, app chờ trạng thái ACK của lệnh phần cứng.
+
+### 👨‍💼 Admin
+
+- Đăng ký bằng mã Admin.
+- Xem trạng thái 4 tủ hiện tại.
+- Xem kiện hàng đang chiếm từng tủ.
+- Xem lịch sử gửi hàng / nhận hàng / mở khẩn cấp.
+- Có thể mở khẩn cấp tủ đang có hàng.
+- Trong ESP32 mode, Admin có luồng mở relay → chờ ACK → bấm xác nhận để gửi lệnh tắt relay.
+
+---
+
+## 2. Kiến trúc hiện tại
+
+```mermaid
+flowchart LR
+    S[Shipper App] --> AI[AI OCR trên Android]
+    AI --> API[Railway Backend\nNode.js + Express]
+
+    R[Resident App] --> API
+    A[Admin App] --> API
+
+    API --> DB[(SQLite\nRailway Persistent Volume)]
+    API --> FCM[Firebase Cloud Messaging]
+    FCM --> R
+
+    API --> HC[(hardware_commands)]
+    E[ESP32] -->|HTTPS polling| API
+    API -->|OPEN / CLOSE command| E
+    E --> RELAY[4 Relay]
+    RELAY --> L[Locker A01 / A02 / B01 / B05]
 ```
 
-Dictionary OCR:
+### 4 tủ vật lý hiện dùng
+
+| Locker | GPIO ESP32 | Relay |
+|---|---:|---|
+| A01 | GPIO 25 | IN1 |
+| A02 | GPIO 26 | IN2 |
+| B01 | GPIO 27 | IN3 |
+| B05 | GPIO 32 | IN4 |
+
+Backend hiện coi cả 4 tủ là size `M`. `C01` và `C02` đã được loại khỏi danh sách cấp tủ mới và Admin overview.
+
+---
+
+## 3. Luồng giao hàng hiện tại
 
 ```text
-android/app/src/main/assets/smartlocker/ppocr_keys.txt
+Shipper đăng nhập
+        ↓
+Chụp bill / nhập SĐT thủ công
+        ↓
+AI OCR nhận diện SĐT người nhận
+        ↓
+Shipper kiểm tra và xác nhận SĐT
+        ↓
+POST /packages
+        ↓
+Backend kiểm tra tài khoản Cư dân
+        ↓
+Backend chọn tủ trống trong A01 / A02 / B01 / B05
+        ↓
+Tạo package + OTP 6 số
+        ↓
+Lưu OTP dạng hash + mã hóa AES-256-GCM
+        ↓
+Gửi Firebase notification cho Cư dân
+        ↓
+Cư dân mở đúng đơn hàng
+        ↓
+OTP được hiển thị trong app
+        ↓
+Cư dân bấm MỞ TỦ
+        ↓
+Backend xác minh OTP
+        ↓
+ESP32 mode: queue OPEN command
+        ↓
+ESP32 poll Railway → nhận OPEN → bật đúng relay → ACK
 ```
 
-Input recognizer hiện được chuẩn hóa theo dạng:
+Ở `SOFTWARE` mode, backend mô phỏng mở tủ và chuyển package sang `PICKED_UP` ngay sau khi OTP hợp lệ.
+
+Ở `ESP32` mode, backend chỉ chuyển package sang `PICKED_UP` sau khi hoàn tất chu trình phần cứng và nhận ACK `CLOSE` thành công.
+
+---
+
+## 4. AI nhận diện SĐT người nhận
+
+Phiên bản AI stable hiện tại là **Native Speed V3**.
+
+### Kiến trúc AI
 
 ```text
-N x 3 x 48 x 320
-```
-
-Kết quả recognizer được giải mã theo cơ chế CTC để tạo chuỗi văn bản.
-
-### 13.2. Chuyển model sang ONNX
-
-Hai model PaddleOCR được xuất sang dạng inference và chuyển sang ONNX bằng **Paddle2ONNX**.
-
-Pipeline chuẩn bị model:
-
-```text
-PP-OCRv6 Small
-      |
-      v
-Paddle Inference Model
-      |
-      v
-Paddle2ONNX
-      |
-      v
-model1_detector.onnx
-model2_recognizer.onnx
-      |
-      v
-ONNX Runtime React Native
-      |
-      v
-Android App
-```
-
-Sau khi chuyển đổi, model được kiểm tra bằng `onnx.checker` trước khi đóng gói vào ứng dụng.
-
-### 13.3. Pipeline nhận diện trên ShipperScreen
-
-```text
-Shipper chụp bill
-        |
-        v
+Camera / ảnh bill
+        ↓
 Resize ảnh làm việc
-        |
-        v
-Model 1 - Text Detector
-        |
-        v
-Danh sách text boxes
-        |
-        v
-Model 2 - Text Recognizer
-        |
-        v
-Danh sách text OCR
-        |
-        v
-Receiver Selector
-        |
-        v
-Kiểm tra SĐT Việt Nam
-        |
-        v
-Hiển thị SĐT người nhận
+        ↓
+Android/Kotlin native preprocessing
+        ↓
+Auto-deskew ảnh nghiêng
+        ↓
+PP-OCRv6 Detector V6
+        ↓
+Các vùng văn bản
+        ↓
+PP-OCRv6 Recognizer V6 TopK-F32
+        ↓
+CTC decode
+        ↓
+Trích xuất candidate SĐT Việt Nam
+        ↓
+Receiver / Sender semantic anchors
+        ↓
+Negative context filtering
+        ↓
+Candidate Scoring V4
+        ↓
+R0 fast-path nếu đủ HIGH confidence
+        ↓
+Fallback 90° / 270° / 180° nếu cần
+        ↓
+SĐT người nhận
 ```
 
-Ứng dụng không lấy ngay chuỗi số đầu tiên tìm thấy.  
-Sau OCR, hệ thống tiếp tục xác định **SĐT của người nhận** dựa trên ngữ cảnh của bill.
-
-### 13.4. FAST-SAFE Receiver Selector
-
-Bill giao hàng thường chứa nhiều chuỗi số khác nhau:
-- mã vận đơn;
-- mã đơn hàng;
-- hotline;
-- SĐT người gửi;
-- SĐT người nhận.
-
-Vì vậy, hệ thống dùng lớp chọn kết quả **FAST-SAFE Receiver Selector**.
-
-Các từ khóa ưu tiên:
+### Model hiện dùng
 
 ```text
-Đến
+03_AI/SmartLocker_AI_Full_Current/02_Models_Current_Stable/
+├── model1_detector_V6.onnx
+├── model2_recognizer_V6_TopK_F32.onnx
+└── ppocr_keys.txt
+```
+
+### Phân chia xử lý
+
+- **Kotlin native** xử lý phần nặng: đọc ảnh, auto-deskew, detector, recognizer và ONNX inference.
+- **TypeScript** xử lý logic lựa chọn SĐT: chuẩn hóa candidate, phân tích ngữ cảnh Receiver/Sender, loại hotline/mã vận đơn và chấm điểm V4.
+- ONNX Runtime Android được dùng qua native module `SmartLockerOcrNativeModule.kt`.
+
+### Một số nguyên tắc chọn SĐT
+
+Hệ thống ưu tiên ngữ cảnh như:
+
+```text
 Người nhận
 Receiver
 Recipient
 Consignee
-Giao đến
+Đến / Giao đến
 ```
 
-Các vùng bị giảm điểm hoặc loại:
+và giảm/loại candidate xuất hiện gần:
 
 ```text
-Từ
 Người gửi
 Sender
 Hotline
@@ -537,215 +202,505 @@ Tracking
 Order ID
 ```
 
-Ví dụ:
+SĐT được kiểm tra theo định dạng di động Việt Nam và hỗ trợ chuẩn hóa từ `+84...` về `0...`.
+
+### Tối ưu tốc độ hiện tại
+
+- Auto-deskew native cho bill bị nghiêng.
+- Recognizer chạy batch lớn hơn để giảm số lần `session.run`.
+- TopK-F32 giảm dữ liệu đầu ra recognizer.
+- Fast-path dừng ở góc `0°` khi kết quả V4 đã đủ tin cậy.
+- Chỉ chạy thêm các góc xoay khi kết quả chưa đủ chắc chắn.
+
+Thời gian thực tế phụ thuộc thiết bị, số lượng text box, độ rõ và góc chụp của bill.
+
+---
+
+## 5. Backend
+
+Backend sử dụng:
+
+- Node.js
+- Express.js
+- SQLite (`better-sqlite3`)
+- JWT Authentication
+- bcryptjs
+- Firebase Admin SDK
+- Railway Persistent Volume
+
+### Các bảng chính
 
 ```text
-Mã vận đơn: SPXVN0352984121
+users
+
+devices
+
+packages
+
+activity_logs
+
+hardware_commands
 ```
 
-không được phép biến thành:
+### Trạng thái package
 
 ```text
-0352984121
+READY
+PICKED_UP
+CANCELLED
 ```
 
-vì đây là chuỗi số nằm bên trong mã vận đơn, không phải SĐT độc lập.
-
-Một SĐT hợp lệ phải thỏa điều kiện số di động Việt Nam:
+### Trạng thái hardware command
 
 ```text
-0[35789]xxxxxxxx
+PENDING
+CLAIMED
+DONE
+FAILED
 ```
 
-hoặc được chuẩn hóa từ:
+Hardware command hỗ trợ 2 action:
 
 ```text
-+84xxxxxxxxx
+OPEN
+CLOSE
 ```
 
-sang:
+---
+
+## 6. OTP nhận hàng
+
+OTP hiện là mã **6 chữ số** và có thời gian hết hạn.
+
+Backend không trả OTP cho Shipper. Với đơn mới, OTP không được lưu plaintext trong database mà được lưu theo hai mục đích:
+
+- HMAC-SHA256 để xác minh OTP.
+- AES-256-GCM để backend có thể trả OTP cho đúng Cư dân khi đơn còn hợp lệ.
+
+Khi OTP hết hạn, Cư dân có thể yêu cầu cấp lại qua API.
+
+---
+
+## 7. Firebase Notification
+
+Firebase Cloud Messaging được dùng để gửi thông báo khi có kiện hàng mới.
 
 ```text
-0xxxxxxxxx
+Shipper tạo đơn
+      ↓
+Railway Backend
+      ↓
+Firebase Admin SDK
+      ↓
+Firebase Cloud Messaging
+      ↓
+Thiết bị Android của Cư dân
 ```
 
-### 13.5. Tối ưu tốc độ
+App có xử lý notification khi:
 
-Để giảm thời gian xử lý trên điện thoại, pipeline hiện có các tối ưu:
+- đang chạy;
+- chạy background;
+- được mở từ notification khi app đang đóng.
 
-- Chạy góc `0°` trước.
-- Chỉ thử thêm `90°`, `270°`, `180°` khi chưa tìm được kết quả tin cậy.
-- OCR nhiều text box theo batch thay vì gọi recognizer từng box riêng lẻ.
-- Early-stop khi đã xác định được SĐT người nhận đủ chắc chắn.
-- Ưu tiên execution provider XNNPACK trên Android, tự fallback CPU nếu cần.
-- Resize ảnh trước khi inference để giảm lượng dữ liệu xử lý.
+Khi người dùng bấm notification, app kiểm tra `receiverPhone`. Nếu đang đăng nhập đúng tài khoản Cư dân, app điều hướng đến màn hình nhận hàng. Nếu đang ở tài khoản khác, notification được lưu tạm và yêu cầu chọn đúng tài khoản.
 
-Nhờ vậy hệ thống vẫn hỗ trợ ảnh bị xoay nhưng không bắt buộc phải chạy cả 4 góc trong mọi trường hợp.
+---
 
-### 13.6. Xử lý nhiều góc chụp
+## 8. Ghi nhớ nhiều tài khoản
 
-Pipeline có thể kiểm tra:
+Ứng dụng hỗ trợ lưu nhiều tài khoản đã đăng nhập trong `AsyncStorage` để vào nhanh ở lần mở app sau.
 
 ```text
-0°
-90°
-180°
-270°
+@smartlocker_remembered_accounts_v1
 ```
 
-Điều này giúp AI vẫn có khả năng đọc bill khi Shipper cầm điện thoại hoặc bill bị xoay.
+Ứng dụng lưu session token của tài khoản đã nhớ nhưng **không lưu mật khẩu** trong màn hình đăng nhập nhanh.
 
-Trong trường hợp ảnh chụp đúng chiều và đã tìm được SĐT người nhận ở `0°`, hệ thống dừng sớm để giảm thời gian xử lý.
-
-### 13.7. Tích hợp vào React Native
-
-Module AI được tách riêng tại:
+Các role được hỗ trợ:
 
 ```text
-src/ai/smartlockerOcr.ts
+ADMIN
+RESIDENT
+SHIPPER
 ```
 
-`ShipperScreen.tsx` chịu trách nhiệm:
-- chụp bill;
-- gọi module AI;
-- hiển thị SĐT nhận diện;
-- cho phép Shipper sửa SĐT thủ công;
-- gửi SĐT đã xác nhận lên backend.
+---
 
-Model được copy từ Android assets ra cache trước khi tạo ONNX `InferenceSession`.
+## 9. ESP32 + Relay
 
-Pipeline chạy hoàn toàn trên thiết bị Android, không cần gửi ảnh bill lên Railway.
+Firmware hiện dùng ESP32 DevKit V1 / ESP32-WROOM-32.
 
-### 13.8. Kết quả thực tế
-
-Qua kiểm thử bill có cả SĐT người gửi và người nhận, hệ thống có thể OCR được nhiều dòng trên bill và ưu tiên đúng SĐT nằm trong vùng người nhận.
-
-Ví dụ bill có:
+### Nguyên tắc điều khiển relay
 
 ```text
-Từ:
-SĐT: 0909123456
-
-Đến:
-SĐT: 0327622447
+LOW  = OFF
+HIGH = ON
 ```
 
-kết quả cuối cùng được chọn:
+- Khi khởi động: tất cả relay ở trạng thái OFF.
+- `OPEN`: chỉ bật relay tương ứng với locker và **giữ ON**.
+- ESP32 không tự tắt relay theo timer.
+- `CLOSE`: backend gửi lệnh riêng để tắt relay tương ứng.
+- ESP32 poll Railway khoảng mỗi `1.2 giây`.
+- ESP32 ACK kết quả thực thi về backend.
+- Nếu mất Wi-Fi trong lúc relay đang ON, firmware giữ nguyên trạng thái relay và tiếp tục chờ `CLOSE` sau khi kết nối lại.
+
+### Giao tiếp phần cứng
+
+ESP32 dùng HTTPS tới backend Railway và xác thực bằng:
 
 ```text
-0327622447
+x-device-key
+x-device-id
 ```
 
-Nếu AI chưa tìm được số phù hợp, Shipper vẫn có thể nhập hoặc sửa SĐT thủ công trước khi xác nhận gửi hàng.
-
-## 14. Trạng thái phần cứng
-
-Hiện tại chức năng mở khóa đang chạy ở:
+Các endpoint phần cứng chính:
 
 ```text
-SOFTWARE MODE
+GET  /hardware/ping
+GET  /hardware/commands/next
+POST /hardware/commands/:commandId/complete
 ```
 
-Backend mô phỏng việc mở khóa.
+---
 
-Hướng phát triển tiếp theo:
+## 10. API chính
+
+### Authentication
 
 ```text
-Backend
-   |
-HTTP / MQTT
-   |
-ESP32
-   |
-Relay
-   |
-Khóa điện
+POST /auth/register
+POST /auth/login
+GET  /auth/me
 ```
 
-Chỉ khi ESP32 phản hồi mở khóa thành công thì backend mới cập nhật đơn thành `PICKED_UP`.
-
-## 15. Lưu ý bảo mật
-
-Không commit các file sau lên GitHub:
+### Device / Firebase
 
 ```text
-.env
-firebase-service-account.json
-smartlocker.db
-smartlocker.db-shm
-smartlocker.db-wal
-node_modules/
-android/.cxx/
-android/build/
-android/app/build/
+POST /devices/register
+GET  /devices/me
 ```
 
-Các secret như `JWT_SECRET`, `ADMIN_REGISTER_CODE`, `SHIPPER_REGISTER_CODE` và Firebase private key phải lưu trong Railway Variables hoặc file `.env` local.
-
-## 16. Mục tiêu đề tài
-
-SmartLocker hướng đến mô hình giao nhận hàng tự động, trong đó:
-- Shipper được xác thực trước khi tạo đơn.
-- AI PP-OCRv6 + ONNX hỗ trợ OCR toàn bill và tự chọn đúng số điện thoại người nhận.
-- Backend tự động cấp tủ.
-- Cư dân nhận thông báo và OTP trên điện thoại.
-- Admin giám sát toàn bộ trạng thái hệ thống.
-- Có khả năng mở rộng sang ESP32 và khóa điện thực tế.
-
-## Khắc phục sự cố
-
-### Metro không kết nối được
-
-Chạy lại Metro:
-
-```bash
-npx react-native start --reset-cache
-```
-
-Sau đó mở terminal khác:
-
-```bash
-npx react-native run-android
-```
-
-### Emulator báo `Unable to load script`
-
-Kiểm tra Metro có đang chạy ở:
+### Package / Resident
 
 ```text
-http://localhost:8081
+POST /packages
+GET  /packages/my
+POST /packages/:packageId/otp/refresh
+POST /packages/:packageId/redeem
 ```
 
-Nếu Metro chưa chạy, khởi động lại bằng:
+### Hardware app-side
 
-```bash
-npx react-native start --reset-cache
+```text
+GET  /hardware/commands/:commandId/status
+POST /hardware/packages/:packageId/close
 ```
 
-### Lỗi cache Android / CMake
+### ESP32
 
-Có thể xóa các thư mục build tạm:
-
-```powershell
-Remove-Item -Recurse -Force .\android\.cxx -ErrorAction SilentlyContinue
-Remove-Item -Recurse -Force .\android\app\.cxx -ErrorAction SilentlyContinue
-Remove-Item -Recurse -Force .\node_modules\react-native-worklets-core\android\.cxx -ErrorAction SilentlyContinue
+```text
+GET  /hardware/ping
+GET  /hardware/commands/next
+POST /hardware/commands/:commandId/complete
 ```
 
-Sau đó chạy lại Metro và app.
+### Admin
 
-### Backend không kết nối được
+```text
+GET  /admin/overview
+GET  /admin/history
+POST /admin/packages/:packageId/force-open
+```
 
-Kiểm tra endpoint:
+### Health check
 
 ```text
 GET /health
 ```
 
-và xác nhận `API_BASE_URL` đang trỏ đúng backend Railway.
+---
 
-Nếu Railway đang deploy từ GitHub, kiểm tra deployment mới nhất đã ở trạng thái `Online` / `Active`.
+## 11. Cấu trúc repository
 
-## 17. Tác giả
+```text
+SmartLocker_Full_Project/
+│
+├── 00_INDEX/
+│   ├── FILE_MANIFEST.csv
+│   ├── FOLDER_TREE.txt
+│   └── README_PROJECT_STRUCTURE.txt
+│
+├── 01_Hardware_ESP32/
+│   ├── Firmware/
+│   │   └── SmartLockerESP32.ino
+│   └── Config/
+│       └── secrets.h
+│
+├── 02_Software/
+│   ├── Backend/
+│   │   ├── server.js
+│   │   ├── database.js
+│   │   ├── package.json
+│   │   ├── package-lock.json
+│   │   ├── .env
+│   │   └── .env.example
+│   │
+│   └── Mobile_App/
+│       ├── App.tsx
+│       ├── package.json
+│       ├── src/
+│       │   ├── ai/
+│       │   │   └── smartlockerOcr.ts
+│       │   ├── config/
+│       │   │   └── api.ts
+│       │   ├── context/
+│       │   │   ├── AuthContext.tsx
+│       │   │   └── LockerContext.tsx
+│       │   ├── navigation/
+│       │   │   └── AppNavigator.tsx
+│       │   ├── services/
+│       │   │   ├── authApi.ts
+│       │   │   └── firebaseMessaging.ts
+│       │   └── screens/
+│       │       ├── HomeScreen.tsx
+│       │       ├── LoginScreen.tsx
+│       │       ├── RegisterScreen.tsx
+│       │       ├── ShipperScreen.tsx
+│       │       ├── ResidentScreen.tsx
+│       │       ├── AdminScreen.tsx
+│       │       └── HistoryScreen.tsx
+│       └── android/
+│           └── ...
+│
+└── 03_AI/
+    ├── 00_Original_Archive/
+    └── SmartLocker_AI_Full_Current/
+        ├── 00_README/
+        ├── 01_Training/
+        ├── 02_Models_Current_Stable/
+        ├── 03_App_AI_Current_Stable/
+        ├── 04_Evaluation/
+        ├── 05_Documentation/
+        └── 06_Benchmark_Evidence/
+```
 
-Đồ án SmartLocker phục vụ mục đích học tập và nghiên cứu.
+`00_INDEX/FILE_MANIFEST.csv` chứa nguồn gốc file, vị trí sau khi tổ chức, kích thước và SHA-256 để đối chiếu.
+
+---
+
+## 12. Cấu hình Backend
+
+Tạo biến môi trường tương ứng với `02_Software/Backend/.env.example`.
+
+Ví dụ cấu hình an toàn:
+
+```env
+PORT=3000
+JWT_SECRET=CHANGE_ME_TO_A_LONG_RANDOM_SECRET
+ADMIN_REGISTER_CODE=CHANGE_ME
+SHIPPER_REGISTER_CODE=CHANGE_ME
+OTP_TTL_MINUTES=15
+
+# Local Firebase
+FIREBASE_SERVICE_ACCOUNT_PATH=./firebase-service-account.json
+
+# Railway có thể dùng raw JSON hoặc Base64
+# FIREBASE_SERVICE_ACCOUNT_JSON={...}
+# FIREBASE_SERVICE_ACCOUNT_BASE64=...
+
+# ESP32 mode
+HARDWARE_MODE=ESP32
+ESP_DEVICE_KEY=CHANGE_ME_TO_A_LONG_RANDOM_DEVICE_KEY
+ESP_DEVICE_ID=ESP32-LOCKER-01
+HARDWARE_COMMAND_STALE_SECONDS=30
+
+# Optional
+# DB_PATH=/data/smartlocker.db
+```
+
+Trên Railway nên cấu hình các giá trị bí mật bằng **Railway Variables**, không commit `.env` thật lên GitHub.
+
+---
+
+## 13. Cấu hình ESP32
+
+Firmware đọc cấu hình từ:
+
+```text
+01_Hardware_ESP32/Config/secrets.h
+```
+
+Các giá trị cần cấu hình:
+
+```cpp
+#define WIFI_SSID "YOUR_WIFI"
+#define WIFI_PASSWORD "YOUR_WIFI_PASSWORD"
+#define API_BASE_URL "YOUR_BACKEND_URL"
+#define ESP_DEVICE_KEY "SAME_KEY_AS_BACKEND"
+#define ESP_DEVICE_ID "ESP32-LOCKER-01"
+```
+
+`ESP_DEVICE_KEY` trên ESP32 phải trùng với `ESP_DEVICE_KEY` trên Railway/backend.
+
+---
+
+## 14. Chạy Backend local
+
+Yêu cầu Node.js phù hợp với project.
+
+```bash
+cd 02_Software/Backend
+npm install
+npm start
+```
+
+Kiểm tra:
+
+```text
+GET http://localhost:3000/health
+```
+
+Phản hồi thành công có dạng:
+
+```json
+{
+  "ok": true,
+  "service": "smartlocker-backend"
+}
+```
+
+---
+
+## 15. Mobile App
+
+Mobile app hiện dùng React Native `0.87.1` và hướng đến Android.
+
+Một số thư viện chính:
+
+- React Native Vision Camera
+- React Navigation
+- AsyncStorage
+- React Native Firebase Messaging
+- React Native Image Resizer
+- Native Android ONNX Runtime integration
+
+> Gói repository được tổ chức cho mục đích lưu trữ/báo cáo và chỉ giữ các source/config quan trọng đã cung cấp. Nếu build từ thư mục `02_Software/Mobile_App`, cần bảo đảm các file boilerplate React Native/Gradle đầy đủ của project gốc cũng có mặt.
+
+Với project React Native đầy đủ:
+
+```bash
+npm install
+npx react-native start --reset-cache
+```
+
+Mở terminal khác:
+
+```bash
+npx react-native run-android
+```
+
+Do AI hiện có native Kotlin module, khi thay đổi phần Kotlin nên clean Android trước khi build lại.
+
+---
+
+## 16. Railway + SQLite
+
+Backend có thể deploy trên Railway và sử dụng SQLite cùng Persistent Volume.
+
+Khi Railway có volume mount, backend tự nhận biết `RAILWAY_VOLUME_MOUNT_PATH`. Có thể dùng `DB_PATH` nếu muốn ép đường dẫn database.
+
+Các dữ liệu chính được giữ trong SQLite gồm:
+
+- tài khoản;
+- FCM device token;
+- package;
+- OTP metadata;
+- lịch sử;
+- hardware command.
+
+---
+
+## 17. Trạng thái triển khai phần cứng hiện tại
+
+Backend và firmware đã hỗ trợ đầy đủ mô hình command:
+
+```text
+OPEN → relay ON → ESP ACK
+CLOSE → relay OFF → ESP ACK → package PICKED_UP
+```
+
+Luồng **Admin mở khẩn cấp** trong `AdminScreen.tsx` đã gọi cả OPEN và CLOSE: sau khi ESP32 mở relay, Admin bấm `OK - TẮT RELAY` để gửi lệnh CLOSE.
+
+Trong `ResidentScreen.tsx` của đúng gói source này, màn hình Cư dân hiện đã:
+
+- xác minh OTP;
+- gửi yêu cầu OPEN;
+- chờ ESP32 ACK `DONE`;
+- thông báo mở tủ thành công.
+
+Tuy nhiên màn hình Cư dân **chưa gọi endpoint `/hardware/packages/:packageId/close` sau khi người dùng xác nhận đã lấy hàng**. Backend và firmware đã có sẵn endpoint/logic CLOSE, vì vậy đây là phần cần nối tiếp ở UI Cư dân nếu dùng ESP32 mode hoàn chỉnh ngoài demo.
+
+---
+
+## 18. Lưu ý bảo mật trước khi đưa lên GitHub
+
+**Không push repository công khai khi vẫn còn secret thật.**
+
+Gói hiện tại có các file cấu hình cần kiểm tra/xóa hoặc thay bằng bản mẫu trước khi public:
+
+```text
+02_Software/Backend/.env
+01_Hardware_ESP32/Config/secrets.h
+firebase-service-account.json        # nếu có
+smartlocker.db                       # nếu có dữ liệu thật
+```
+
+Không commit các giá trị thật của:
+
+```text
+JWT_SECRET
+ADMIN_REGISTER_CODE
+SHIPPER_REGISTER_CODE
+ESP_DEVICE_KEY
+Wi-Fi password
+Firebase private key
+```
+
+Nên chỉ giữ `.env.example` và một `secrets.example.h` chứa placeholder trong repository public.
+
+---
+
+## 19. Mục tiêu đề tài
+
+SmartLocker hướng đến mô hình nhận hàng tự động với quy trình:
+
+- xác thực Shipper trước khi tạo đơn;
+- dùng AI OCR hỗ trợ lấy SĐT người nhận từ bill;
+- backend tự động quản lý tủ và OTP;
+- gửi notification cho Cư dân;
+- cho phép Cư dân nhận hàng bằng OTP;
+- cho phép Admin giám sát và mở khẩn cấp;
+- kết nối backend cloud với ESP32 để điều khiển relay/tủ thật.
+
+Dự án được xây dựng phục vụ mục đích **học tập, nghiên cứu và demo đồ án SmartLocker**.
+
+---
+
+## 20. Tài liệu AI trong repository
+
+Nếu cần đọc sâu phần AI, ưu tiên:
+
+```text
+03_AI/SmartLocker_AI_Full_Current/00_README/README_AI_FINAL_PACKAGE.txt
+03_AI/SmartLocker_AI_Full_Current/05_Documentation/Tong_quan_luong_AI_SmartLocker_trong_App.docx
+03_AI/SmartLocker_AI_Full_Current/01_Training/SmartLocker_PP-OCRv6_MC-OCR_FULL_14_CELLS_FIXED_V2.ipynb
+03_AI/SmartLocker_AI_Full_Current/03_App_AI_Current_Stable/src/ai/smartlockerOcr.ts
+03_AI/SmartLocker_AI_Full_Current/03_App_AI_Current_Stable/android/app/src/main/java/com/smartlockerapp/ai/SmartLockerOcrNativeModule.kt
+03_AI/SmartLocker_AI_Full_Current/04_Evaluation/SMARTLOCKER_TEST_FULL_8_CELLS_V4_HYBRID.ipynb
+```
+
+---
+
+**SmartLocker — React Native + Railway + Firebase + PP-OCRv6/ONNX + ESP32**
