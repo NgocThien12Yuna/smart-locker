@@ -5,7 +5,7 @@ SmartLocker là hệ thống **tủ nhận hàng thông minh** dành cho mô hì
 Phiên bản hiện tại có 3 vai trò chính:
 
 - **Shipper**: đăng nhập, chụp bill hoặc nhập số điện thoại người nhận, tạo đơn giao hàng.
-- **Cư dân**: nhận thông báo, xem OTP, yêu cầu mở tủ và nhận hàng.
+- **Cư dân**: nhận thông báo, xem OTP, mở tủ nhận hàng và xác nhận tắt relay sau khi lấy hàng.
 - **Admin**: theo dõi trạng thái tủ, lịch sử giao dịch và mở tủ khẩn cấp.
 
 > README này mô tả **code hiện tại của repository `SmartLockerApp`**. Các luồng cũ như Shipper không cần đăng nhập, nhận hàng bằng QR hoặc pipeline OCR TFLite cũ không còn là luồng chính.
@@ -70,7 +70,7 @@ flowchart LR
 - Xem OTP của đúng kiện hàng thuộc tài khoản hiện tại.
 - Có thể cấp lại OTP khi OTP hết hạn.
 - Bấm **MỞ TỦ** để backend xác minh OTP.
-- Trong ESP32 mode, app chờ ESP32 ACK trạng thái lệnh mở tủ.
+- Trong ESP32 mode, app chờ ESP32 ACK lệnh OPEN, sau đó hiển thị nút **OK - TẮT RELAY** để người dùng chủ động gửi CLOSE và chờ ACK.
 
 ### 👨‍💼 Admin
 
@@ -153,7 +153,7 @@ Bật relay tương ứng
 ESP32 ACK DONE / FAILED
 ```
 
-Backend cũng hỗ trợ lệnh `CLOSE` để tắt relay. Package chỉ được hoàn tất theo chu trình phần cứng khi lệnh đóng được xử lý thành công.
+Backend hỗ trợ chu trình **OPEN → ACK → người dùng xác nhận OK - TẮT RELAY → CLOSE → ACK**. Ứng dụng không tự gửi CLOSE ngay sau OPEN; chỉ cập nhật hoàn tất khi ESP32 xác nhận CLOSE thành công.
 
 ---
 
@@ -189,6 +189,13 @@ android/app/src/main/assets/smartlocker/
 ├── model2_recognizer_inference.yml
 └── ppocr_keys.txt
 ```
+
+**Lưu ý về metadata OCR:** Kotlin Native hiện nạp trực tiếp hai model tại
+`smartlocker/model1_detector.onnx` và
+`smartlocker/model2_recognizer.onnx`, cùng từ điển
+`smartlocker/ppocr_keys.txt`. Các đường dẫn trong
+`manifest.json` có thể là metadata từ quy trình xuất model
+trước đây, không phải đường dẫn runtime của Kotlin.
 
 ### 5.2. Native module
 
@@ -749,7 +756,7 @@ Backend cập nhật command DONE / FAILED
 
 - `AdminScreen.tsx` đã có luồng mở relay và gửi lệnh `CLOSE` sau khi Admin xác nhận.
 - `ResidentScreen.tsx` hiện xác minh OTP, gửi `OPEN` và chờ ESP32 ACK thành công.
-- Bước xác nhận `CLOSE` sau khi Cư dân lấy hàng chưa được nối trực tiếp vào UI Cư dân trong phiên bản source hiện tại.
+- `ResidentScreen.tsx` đã có nút **OK - TẮT RELAY** sau khi OPEN thành công. App gửi `POST /hardware/packages/:packageId/close`, chờ ESP32 ACK CLOSE và cho phép thử lại nếu chưa được xác nhận.
 
 ---
 
@@ -815,7 +822,7 @@ Các phần chính đã có trong source:
 - ✅ Railway backend + SQLite Persistent Volume.
 - ✅ Backend hardware command cho ESP32.
 - ✅ OPEN/CLOSE command + ACK.
-- ⚠️ Resident UI hiện mới nối đầy đủ đến bước OPEN/ACK; bước CLOSE sau khi lấy hàng cần hoàn thiện nếu chạy full hardware flow.
+- ✅ Resident UI đã có chu trình OPEN → ACK → OK - TẮT RELAY → CLOSE → ACK.
 
 ---
 
@@ -835,4 +842,29 @@ Dự án được phát triển phục vụ mục đích **học tập, nghiên 
 
 ---
 
+## 20. Bộ nộp Source Code Android - Mục 6
+
+Bộ nộp Mục 6 tập trung vào mã nguồn ứng dụng Android
+được phát triển bằng React Native, TypeScript và Kotlin Native.
+
+Bộ nộp gồm:
+- Mã nguồn các màn hình Shipper, Cư dân, Admin.
+- Navigation, Context, API và Services.
+- Mã Kotlin Android và Native OCR.
+- AndroidManifest, Gradle và Android resources.
+- Metadata, từ điển và cấu hình OCR.
+- README hướng dẫn cấu trúc mã nguồn.
+
+Để đáp ứng giới hạn dưới 20 MB, bộ nộp không kèm:
+- node_modules và Gradle cache;
+- file build, APK, AAB;
+- model AI ONNX/TFLite dung lượng lớn;
+- Backend, database runtime, firmware ESP32;
+- khóa bí mật và cấu hình cá nhân.
+
+Bộ source dùng để xem xét và đánh giá mã nguồn.
+Muốn chạy lại cần cài dependencies và bổ sung cấu hình,
+model AI, Backend cùng môi trường Android tương ứng.
+
+---
 **SmartLocker — React Native + Node.js/Express + Railway + SQLite + Firebase + PP-OCRv6/ONNX + ESP32**
